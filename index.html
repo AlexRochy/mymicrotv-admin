@@ -158,6 +158,7 @@
   <div class="status">
     <span><span class="dot wait" id="statusSupabase"></span>Supabase</span>
     <span><span class="dot wait" id="statusR2"></span>R2</span>
+    <button class="btn" id="btnLock" title="Lock the panel (ask password next time)" style="padding:6px 10px;font-size:13px">🔒 Lock</button>
   </div>
 </header>
 
@@ -170,6 +171,9 @@
       <label for="gatePassword">Password</label>
       <input type="password" id="gatePassword" autocomplete="current-password" placeholder="••••••••">
     </div>
+    <label style="display:flex;align-items:center;gap:8px;margin:8px 0 12px;font-size:14px;cursor:pointer">
+      <input type="checkbox" id="gateRemember" checked> Remember me on this device
+    </label>
     <button class="btn" id="gateBtn" style="width:100%">Unlock</button>
     <div class="msg" id="gateMsg"></div>
   </div>
@@ -520,6 +524,7 @@ function slugify(s) {
 /* ---------------- B. config store + password gate ---------------- */
 const LS_CFG = 'mmt_admin_config';   // JSON of all backend settings
 const LS_GATE = 'mmt_admin_gate';    // SHA-256 hash of the local panel password
+const LS_REMEMBER = 'mmt_admin_remember'; // '1' = skip password gate on this device
 
 const DEFAULT_CFG = {
   supabaseUrl: '', anonKey: '', adminEmail: '', adminPassword: '',
@@ -563,6 +568,9 @@ async function initGate() {
     $('gateTitle').textContent = 'Set admin password';
     $('gateHint').textContent = 'First run: choose a password for this admin panel (stored hashed in this browser only).';
     $('gateBtn').textContent = 'Set password';
+  } else if (localStorage.getItem(LS_REMEMBER) === '1') {
+    unlock(); // remembered on this device — skip the password prompt
+    return;
   }
   const tryUnlock = async () => {
     const pw = $('gatePassword').value;
@@ -571,9 +579,12 @@ async function initGate() {
     const existing = localStorage.getItem(LS_GATE);
     if (!existing) {
       localStorage.setItem(LS_GATE, hash);
+      if ($('gateRemember').checked) localStorage.setItem(LS_REMEMBER, '1');
       unlock();
       toast('Password set — welcome!');
     } else if (hash === existing) {
+      if ($('gateRemember').checked) localStorage.setItem(LS_REMEMBER, '1');
+      else localStorage.removeItem(LS_REMEMBER);
       unlock();
     } else {
       setMsg('gateMsg', 'Wrong password.', 'err');
@@ -589,6 +600,10 @@ function unlock() {
   loadConfigIntoForm();
   testConnections(true); // quiet auto-check on unlock
 }
+$('btnLock').onclick = () => {
+  localStorage.removeItem(LS_REMEMBER);
+  location.reload();
+};
 $('btnChangeGate').onclick = async () => {
   const pw = $('newGatePassword').value;
   if (!pw || pw.length < 4) { setMsg('gateMsg2', 'Use at least 4 characters.', 'err'); return; }
