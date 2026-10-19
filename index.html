@@ -1,0 +1,1453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Micro TV — Admin Panel</title>
+<!--
+  My Micro TV — Admin Panel (single self-contained file)
+  =======================================================
+  Static, GitHub-Pages-ready. No build step. Open in desktop Chrome.
+
+  Tabs:
+    1. Config      — local password gate + Supabase + Cloudflare R2 settings
+    2. Upload      — upload a video to R2, auto-capture thumbnail, insert series/part rows
+    3. Cut Points  — set virtual start/end cut points (start_ms/end_ms) per part
+    4. Analytics   — Chart.js dashboards from view_events
+    5. Content     — list / edit / delete series and parts
+
+  Backend contract (do not change lightly):
+    Supabase tables:
+      series(id uuid, title, description, category, poster_url, is_ai_generated bool, created_at)
+      parts (id uuid, series_id uuid FK, part_number int, title, video_url text,
+             thumbnail_url text, start_ms bigint, end_ms bigint,
+             published bool, views_count int, created_at)
+      view_events(id uuid, part_id uuid FK, watched_ms int, created_at)
+    RLS: anon SELECT series + published parts, INSERT view_events;
+         authenticated (admin email login) can do everything.
+    Videos live on Cloudflare R2 (S3-compatible), served from the public base URL.
+
+  IMPORTANT — R2 CORS: the browser PUTs straight to R2, so the bucket needs a
+  CORS rule, e.g. AllowedOrigins: ["*"] (or your Pages domain),
+  AllowedMethods: ["GET","PUT","HEAD","DELETE"], AllowedHeaders: ["*"].
+  Without it uploads fail with a CORS/network error.
+-->
+<style>
+  :root{
+    --bg:#0f1115; --card:#171b22; --card2:#1e242e; --line:#2a3140;
+    --text:#e8ecf1; --muted:#9aa4b2; --accent:#4da3ff; --gold:#f2c14e;
+    --green:#3ddc84; --red:#ff5c5c; --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+       background:var(--bg);color:var(--text)}
+  header.topbar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:14px;
+    padding:12px 20px;background:#12151b;border-bottom:1px solid var(--line)}
+  header.topbar h1{font-size:18px;margin:0;flex:1}
+  header.topbar h1 .sub{color:var(--muted);font-weight:400;font-size:13px}
+  .status{display:flex;align-items:center;gap:14px;font-size:13px;color:var(--muted)}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#555;margin-right:6px;vertical-align:1px}
+  .dot.ok{background:var(--green)} .dot.bad{background:var(--red)} .dot.wait{background:var(--gold)}
+  main{max-width:1100px;margin:0 auto;padding:20px}
+  nav.tabs{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap}
+  nav.tabs button{background:var(--card);border:1px solid var(--line);color:var(--text);
+    padding:10px 18px;border-radius:var(--radius);cursor:pointer;font-size:14px}
+  nav.tabs button.active{background:var(--accent);border-color:var(--accent);color:#06121f;font-weight:600}
+  nav.tabs button:hover:not(.active){border-color:var(--accent)}
+  section.tab{display:none}
+  section.tab.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:18px;margin-bottom:16px}
+  .card h2{margin:0 0 4px;font-size:17px}
+  .card h3{margin:14px 0 8px;font-size:14px;color:var(--accent)}
+  .hint{color:var(--muted);font-size:13px;margin:4px 0 12px;line-height:1.5}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  .field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;min-width:200px;flex:1}
+  .field label{font-size:13px;color:var(--muted)}
+  input[type=text],input[type=password],input[type=file],input[type=number],select,textarea{
+    background:var(--card2);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:10px 12px;font-size:14px;width:100%}
+  textarea{resize:vertical;min-height:70px}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  button.btn{background:var(--accent);color:#06121f;border:none;border-radius:8px;
+    padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer}
+  button.btn:hover{filter:brightness(1.1)}
+  button.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  button.btn.danger{background:transparent;color:var(--red);border:1px solid var(--red)}
+  button.btn.small{padding:6px 12px;font-size:13px}
+  button.btn:disabled{opacity:.5;cursor:not-allowed}
+  .msg{font-size:13px;margin-top:10px;min-height:18px}
+  .msg.err{color:var(--red)} .msg.ok{color:var(--green)}
+  .progress{height:14px;background:var(--card2);border-radius:7px;overflow:hidden;margin:10px 0}
+  .progress > div{height:100%;width:0%;background:var(--accent);transition:width .2s}
+  .switchrow{display:flex;align-items:center;gap:10px;margin:10px 0;font-size:14px}
+  .switch{position:relative;width:44px;height:24px;flex:none}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:#3a4356;border-radius:24px;cursor:pointer;transition:.2s}
+  .slider:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;
+    background:#fff;border-radius:50%;transition:.2s}
+  .switch input:checked + .slider{background:var(--green)}
+  .switch input:checked + .slider:before{transform:translateX(20px)}
+  /* gate */
+  #gate{max-width:420px;margin:80px auto}
+  /* cut timeline */
+  #timeline{position:relative;height:56px;background:var(--card2);border:1px solid var(--line);
+    border-radius:8px;margin:14px 0;cursor:crosshair;user-select:none;touch-action:none}
+  #timeline .sel{position:absolute;top:0;bottom:0;background:rgba(77,163,255,.25);
+    border-left:2px solid var(--accent);border-right:2px solid var(--accent);pointer-events:none}
+  .marker{position:absolute;top:-6px;width:14px;height:68px;margin-left:-7px;cursor:ew-resize;z-index:2}
+  .marker .flag{width:14px;height:22px;border-radius:4px 4px 0 0}
+  .marker .pole{width:3px;height:46px;margin:0 auto;background:currentColor}
+  #markerStart{color:var(--green)} #markerStart .flag{background:var(--green)}
+  #markerEnd{color:var(--red)} #markerEnd .flag{background:var(--red)}
+  .tick{position:absolute;top:0;bottom:0;width:1px;background:#ffffff14;pointer-events:none}
+  .ticklabel{position:absolute;bottom:2px;font-size:10px;color:var(--muted);transform:translateX(-50%);pointer-events:none}
+  video.player{width:100%;max-height:420px;background:#000;border-radius:8px}
+  /* analytics */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .stat .v{font-size:26px;font-weight:700}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:4px}
+  .chartbox{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:16px;margin-bottom:16px}
+  .chartbox h3{margin:0 0 10px;font-size:15px}
+  .chartbox canvas{max-height:300px}
+  .empty{color:var(--muted);font-size:13px;padding:24px;text-align:center}
+  /* content list */
+  .series{border:1px solid var(--line);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
+  .series-head{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--card2);cursor:pointer}
+  .series-head img{width:52px;height:72px;object-fit:cover;border-radius:6px;background:#000}
+  .series-head .t{flex:1}
+  .series-head .t b{font-size:15px}
+  .series-head .t span{display:block;font-size:12px;color:var(--muted)}
+  .parts{display:none;padding:8px 16px 16px}
+  .series.open .parts{display:block}
+  .part{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line);font-size:14px}
+  .part img{width:64px;height:36px;object-fit:cover;border-radius:4px;background:#000}
+  .part .info{flex:1}
+  .part .info small{color:var(--muted);display:block}
+  .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:#2a3140;color:var(--muted);margin-left:8px}
+  .badge.pub{background:#123f2a;color:var(--green)}
+  .badge.ai{background:#3a2f12;color:var(--gold)}
+  .editform{background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:12px;margin:8px 0}
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222a36;
+    border:1px solid var(--line);color:var(--text);padding:12px 20px;border-radius:10px;
+    font-size:14px;display:none;z-index:200;max-width:90vw}
+  code.url{word-break:break-all;background:var(--card2);padding:6px 10px;border-radius:6px;
+    display:block;margin:6px 0;font-size:12px}
+  .kv{font-size:13px;color:var(--muted)}
+  .kv b{color:var(--text)}
+</style>
+<!-- Chart.js (UMD global) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<!-- ESM imports for Supabase + AWS SDK v3 (S3-compatible R2) -->
+<script type="importmap">
+{
+  "imports": {
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2",
+    "@aws-sdk/client-s3": "https://esm.sh/@aws-sdk/client-s3@3",
+    "@aws-sdk/lib-storage": "https://esm.sh/@aws-sdk/lib-storage@3?bundle"
+  }
+}
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>📺 My Micro TV <span class="sub">Admin Panel</span></h1>
+  <div class="status">
+    <span><span class="dot wait" id="statusSupabase"></span>Supabase</span>
+    <span><span class="dot wait" id="statusR2"></span>R2</span>
+  </div>
+</header>
+
+<!-- ============ PASSWORD GATE ============ -->
+<div id="gate">
+  <div class="card">
+    <h2 id="gateTitle">Admin Login</h2>
+    <p class="hint" id="gateHint">Enter your admin panel password to continue.</p>
+    <div class="field">
+      <label for="gatePassword">Password</label>
+      <input type="password" id="gatePassword" autocomplete="current-password" placeholder="••••••••">
+    </div>
+    <button class="btn" id="gateBtn" style="width:100%">Unlock</button>
+    <div class="msg" id="gateMsg"></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<main id="app" style="display:none">
+  <nav class="tabs">
+    <button data-tab="config" class="active">⚙️ Config</button>
+    <button data-tab="upload">⬆️ Upload</button>
+    <button data-tab="cut">✂️ Cut Points</button>
+    <button data-tab="analytics">📊 Analytics</button>
+    <button data-tab="content">🗂️ Content</button>
+  </nav>
+
+  <!-- ===== TAB: CONFIG ===== -->
+  <section class="tab active" id="tab-config">
+    <div class="card">
+      <h2>Panel Password</h2>
+      <p class="hint">This is a LOCAL gate only (stored as a SHA-256 hash in this browser's localStorage). It does not protect Supabase or R2.</p>
+      <div class="row">
+        <div class="field">
+          <label for="newGatePassword">New panel password</label>
+          <input type="password" id="newGatePassword" placeholder="Choose a new password">
+        </div>
+        <div><button class="btn" id="btnChangeGate">Change password</button></div>
+      </div>
+      <div class="msg" id="gateMsg2"></div>
+    </div>
+
+    <div class="card">
+      <h2>Supabase</h2>
+      <p class="hint">Project settings → API. The <b>anon key</b> is used for reads; writes sign in with the admin email + password below (RLS allows authenticated users everything).</p>
+      <div class="field">
+        <label for="cfgSupabaseUrl">Supabase URL</label>
+        <input type="text" id="cfgSupabaseUrl" placeholder="https://xyzcompany.supabase.co">
+      </div>
+      <div class="field">
+        <label for="cfgAnonKey">Supabase anon (public) key</label>
+        <input type="password" id="cfgAnonKey" placeholder="eyJhbGciOi...">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="cfgAdminEmail">Admin email (Supabase Auth)</label>
+          <input type="text" id="cfgAdminEmail" placeholder="admin@example.com">
+        </div>
+        <div class="field">
+          <label for="cfgAdminPassword">Admin password (Supabase Auth)</label>
+          <input type="password" id="cfgAdminPassword" placeholder="••••••••">
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn ghost" id="btnSignIn">Sign in as admin</button>
+        <span class="kv" id="authStatus">Not signed in.</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Cloudflare R2</h2>
+      <p class="hint">R2 → Manage R2 API Tokens (read/write token gives an Access Key ID + Secret).
+        Endpoint: <code>https://&lt;accountId&gt;.r2.cloudflarestorage.com</code>.
+        ⚠️ The bucket needs a CORS rule allowing PUT/GET/HEAD/DELETE from this page's origin, otherwise uploads fail.</p>
+      <div class="row">
+        <div class="field">
+          <label for="cfgR2AccountId">R2 Account ID</label>
+          <input type="text" id="cfgR2AccountId" placeholder="abc123...">
+        </div>
+        <div class="field">
+          <label for="cfgR2Bucket">R2 bucket name</label>
+          <input type="text" id="cfgR2Bucket" placeholder="my-micro-tv-videos">
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="cfgR2AccessKey">R2 API token — Access Key ID</label>
+          <input type="text" id="cfgR2AccessKey" placeholder="...">
+        </div>
+        <div class="field">
+          <label for="cfgR2SecretKey">R2 API token — Secret Access Key</label>
+          <input type="password" id="cfgR2SecretKey" placeholder="••••••••">
+        </div>
+      </div>
+      <div class="field">
+        <label for="cfgR2PublicBase">R2 public base URL (serves the files)</label>
+        <input type="text" id="cfgR2PublicBase" placeholder="https://pub-xxxx.r2.dev  (no trailing slash)">
+      </div>
+      <div class="row">
+        <button class="btn" id="btnSaveConfig">💾 Save all settings</button>
+        <button class="btn ghost" id="btnTestConn">Test connections</button>
+      </div>
+      <div class="msg" id="cfgMsg"></div>
+      <p class="hint" style="margin-top:12px">All settings are stored in this browser's localStorage only. Nothing is sent anywhere except to your own Supabase project and R2 bucket.</p>
+    </div>
+  </section>
+
+  <!-- ===== TAB: UPLOAD ===== -->
+  <section class="tab" id="tab-upload">
+    <div class="card">
+      <h2>Upload a video part</h2>
+      <p class="hint">Pick a video file → it uploads to R2 with a progress bar → a thumbnail is auto-captured → fill the form → submit writes the <code>series</code> / <code>parts</code> rows to Supabase and shows the public URLs.</p>
+
+      <div class="field">
+        <label for="upFile">Video file</label>
+        <input type="file" id="upFile" accept="video/*">
+      </div>
+      <div class="progress" id="upProgressWrap" style="display:none">
+        <div id="upProgress"></div>
+      </div>
+      <div class="kv" id="upProgressLabel"></div>
+
+      <div class="row" style="margin-top:12px">
+        <div class="field">
+          <label>Video preview</label>
+          <video class="player" id="upVideoPreview" controls style="display:none"></video>
+        </div>
+        <div class="field">
+          <label>Thumbnail (auto-captured at ~10%)</label>
+          <img id="thumbPreview" alt="thumbnail preview"
+               style="display:none;width:100%;max-width:320px;border-radius:8px;background:#000">
+          <div class="row" style="margin-top:8px">
+            <button class="btn ghost small" id="btnRecaptureThumb">⟳ Re-capture</button>
+            <div class="field" style="margin:0">
+              <input type="file" id="thumbReplace" accept="image/*" title="Replace thumbnail with your own image">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h3>Part details</h3>
+      <div class="row">
+        <div class="field">
+          <label for="upTitle">Part title</label>
+          <input type="text" id="upTitle" placeholder="e.g. The Train Arrives">
+        </div>
+        <div class="field" style="max-width:160px">
+          <label for="upPartNumber">Part number</label>
+          <input type="number" id="upPartNumber" min="1" value="1">
+        </div>
+      </div>
+      <div class="field">
+        <label for="upDescription">Part description</label>
+        <textarea id="upDescription" placeholder="Short description shown under the player"></textarea>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="upCategory">Category</label>
+          <input type="text" id="upCategory" placeholder="e.g. Horror, Comedy, Drama">
+        </div>
+        <div class="field">
+          <label for="upSeries">Series</label>
+          <select id="upSeries"><option value="">— loading series —</option></select>
+        </div>
+      </div>
+
+      <div id="newSeriesFields" style="display:none" class="editform">
+        <h3 style="margin-top:0">New series details</h3>
+        <div class="row">
+          <div class="field">
+            <label for="nsTitle">Series title</label>
+            <input type="text" id="nsTitle" placeholder="e.g. The Last Train at Midnight">
+          </div>
+          <div class="field">
+            <label for="nsCategory">Series category</label>
+            <input type="text" id="nsCategory" placeholder="e.g. Horror">
+          </div>
+        </div>
+        <div class="field">
+          <label for="nsDescription">Series description</label>
+          <textarea id="nsDescription" placeholder="What is this series about?"></textarea>
+        </div>
+        <div class="field">
+          <label for="nsPosterFile">Series poster image (optional — uploaded to R2)</label>
+          <input type="file" id="nsPosterFile" accept="image/*">
+        </div>
+      </div>
+
+      <div class="switchrow">
+        <label class="switch"><input type="checkbox" id="upAi"><span class="slider"></span></label>
+        <span>Made with AI <span class="kv">(sets <code>is_ai_generated</code>)</span></span>
+      </div>
+      <div class="switchrow">
+        <label class="switch"><input type="checkbox" id="upPublished" checked><span class="slider"></span></label>
+        <span>Published <span class="kv">(uncheck to save as draft)</span></span>
+      </div>
+
+      <button class="btn" id="btnUpload" style="margin-top:8px">⬆️ Upload video + save part</button>
+      <div class="msg" id="upMsg"></div>
+      <div id="upResult"></div>
+    </div>
+  </section>
+
+  <!-- ===== TAB: CUT POINTS ===== -->
+  <section class="tab" id="tab-cut">
+    <div class="card">
+      <h2>Cut points</h2>
+      <p class="hint" id="cutNote">Parts are <b>virtual segments of one file</b> — no re-encoding.
+        The app seeks to <code>start_ms</code> and stops at <code>end_ms</code>.
+        Drag the <span style="color:var(--green)">green</span> (start) and <span style="color:var(--red)">red</span> (end) markers on the timeline, or type times as <code>mm:ss</code>.</p>
+      <div class="row">
+        <div class="field">
+          <label for="cutSeries">Series</label>
+          <select id="cutSeries"><option value="">— select series —</option></select>
+        </div>
+        <div class="field">
+          <label for="cutParts">Part</label>
+          <select id="cutParts"><option value="">— select part —</option></select>
+        </div>
+      </div>
+      <div class="kv" id="cutPartTitle" style="margin-bottom:8px"></div>
+      <video class="player" id="cutVideo" controls></video>
+
+      <div id="timeline">
+        <div class="sel" id="timelineSel"></div>
+        <div class="marker" id="markerStart" title="Start"><div class="flag"></div><div class="pole"></div></div>
+        <div class="marker" id="markerEnd" title="End"><div class="flag"></div><div class="pole"></div></div>
+      </div>
+
+      <div class="row">
+        <div class="field" style="max-width:180px">
+          <label for="cutStartInput">Start (mm:ss)</label>
+          <input type="text" id="cutStartInput" value="0:00">
+        </div>
+        <div class="field" style="max-width:180px">
+          <label for="cutEndInput">End (mm:ss)</label>
+          <input type="text" id="cutEndInput" value="0:00">
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn ghost" id="btnAutoSuggest">✨ Auto-suggest</button>
+        <button class="btn ghost" id="btnPreview">▶ Preview ±10s</button>
+        <button class="btn" id="btnSaveCut">💾 Save cut points</button>
+      </div>
+      <p class="hint">Auto-suggest: Part 1 = 0:00–3:00, then 60-second segments (Part 2: 3:00–4:00, Part 3: 4:00–5:00, …), clipped to the video length. Preview plays 10s before the start to 10s after the end.</p>
+      <div class="msg" id="cutMsg"></div>
+    </div>
+  </section>
+
+  <!-- ===== TAB: ANALYTICS ===== -->
+  <section class="tab" id="tab-analytics">
+    <div class="card">
+      <h2>Analytics</h2>
+      <p class="hint">Built from <code>view_events</code> (last 30 days) and the <code>views_count</code> column on parts. Empty states are normal for a new app.</p>
+      <div class="row">
+        <div class="field" style="max-width:320px">
+          <label for="anSeries">Series (for drop-off funnel)</label>
+          <select id="anSeries"><option value="">— select series —</option></select>
+        </div>
+        <div><button class="btn" id="btnRefreshAnalytics">⟳ Refresh</button></div>
+      </div>
+      <div class="msg" id="anMsg"></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v" id="statViews">—</div><div class="l">Total views (30 days)</div></div>
+      <div class="stat"><div class="v" id="statSeries">—</div><div class="l">Total series</div></div>
+      <div class="stat"><div class="v" id="statParts">—</div><div class="l">Total parts</div></div>
+      <div class="stat"><div class="v" id="statPublished">—</div><div class="l">Published parts</div></div>
+    </div>
+    <div class="chartbox"><h3>Views per day (last 30 days)</h3><canvas id="chartDaily"></canvas></div>
+    <div class="chartbox"><h3>Views per series (last 30 days)</h3><canvas id="chartSeries"></canvas></div>
+    <div class="chartbox"><h3>Drop-off funnel — views per part</h3><canvas id="chartFunnel"></canvas></div>
+    <div class="chartbox"><h3>Top 10 parts (all time, by views_count)</h3><canvas id="chartTop"></canvas></div>
+  </section>
+
+  <!-- ===== TAB: CONTENT ===== -->
+  <section class="tab" id="tab-content">
+    <div class="card">
+      <h2>Content</h2>
+      <p class="hint">Click a series header to expand its parts. Deleting a part can also delete its R2 video + thumbnail objects.</p>
+      <button class="btn ghost" id="btnReloadContent">⟳ Reload</button>
+      <div class="msg" id="contentMsg"></div>
+    </div>
+    <div id="contentList"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<!-- Hidden helpers for thumbnail capture (never shown) -->
+<video id="thumbVideo" muted playsinline style="display:none"></video>
+<canvas id="thumbCanvas" style="display:none"></canvas>
+
+<script type="module">
+/* ================================================================
+   My Micro TV — Admin Panel logic
+   Sections:
+     A. tiny helpers (toast, messages, hashing, time fmt)
+     B. config store (localStorage) + password gate
+     C. Supabase + R2 clients, connection status
+     D. tab navigation
+     E. Upload tab
+     F. Cut-points tab
+     G. Analytics tab
+     H. Content tab
+   ================================================================ */
+import { createClient } from '@supabase/supabase-js';
+import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+
+/* ---------------- A. tiny helpers ---------------- */
+const $ = (id) => document.getElementById(id);
+
+function toast(msg, ms = 3500) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => (t.style.display = 'none'), ms);
+}
+function setMsg(id, text, kind = '') {
+  const el = $(id);
+  el.textContent = text || '';
+  el.className = 'msg' + (kind ? ' ' + kind : '');
+}
+/** SHA-256 hex via WebCrypto, with a non-crypto fallback for non-secure contexts (e.g. file://). */
+async function sha256hex(str) {
+  try {
+    if (crypto.subtle) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+  } catch (e) { /* fall through to fallback */ }
+  // Simple FNV-1a fallback — weaker, but only used where WebCrypto is unavailable.
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < str.length; i++) {
+    h1 = Math.imul(h1 ^ str.charCodeAt(i), 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ str.charCodeAt(str.length - 1 - i), 0x811c9dc5) >>> 0;
+  }
+  return 'fnv' + h1.toString(16) + h2.toString(16);
+}
+/** seconds -> "m:ss" */
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+/** "mm:ss" or "m:ss" -> seconds (float). Returns NaN on bad input. */
+function parseTime(str) {
+  const m = String(str).trim().match(/^(\d+):([0-5]?\d(?:\.\d+)?)$/);
+  if (!m) return NaN;
+  return parseInt(m[1], 10) * 60 + parseFloat(m[2]);
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function slugify(s) {
+  return String(s || 'untitled').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'untitled';
+}
+
+/* ---------------- B. config store + password gate ---------------- */
+const LS_CFG = 'mmt_admin_config';   // JSON of all backend settings
+const LS_GATE = 'mmt_admin_gate';    // SHA-256 hash of the local panel password
+
+const DEFAULT_CFG = {
+  supabaseUrl: '', anonKey: '', adminEmail: '', adminPassword: '',
+  r2AccountId: '', r2AccessKey: '', r2SecretKey: '', r2Bucket: '', r2PublicBase: '',
+};
+let CFG = { ...DEFAULT_CFG };
+try { Object.assign(CFG, JSON.parse(localStorage.getItem(LS_CFG) || '{}')); } catch (e) { /* ignore */ }
+
+function saveConfig(silent) {
+  CFG = {
+    supabaseUrl: $('cfgSupabaseUrl').value.trim(),
+    anonKey: $('cfgAnonKey').value.trim(),
+    adminEmail: $('cfgAdminEmail').value.trim(),
+    adminPassword: $('cfgAdminPassword').value,
+    r2AccountId: $('cfgR2AccountId').value.trim(),
+    r2AccessKey: $('cfgR2AccessKey').value.trim(),
+    r2SecretKey: $('cfgR2SecretKey').value,
+    r2Bucket: $('cfgR2Bucket').value.trim(),
+    r2PublicBase: $('cfgR2PublicBase').value.trim().replace(/\/+$/, ''),
+  };
+  localStorage.setItem(LS_CFG, JSON.stringify(CFG));
+  buildClients();
+  if (!silent) { setMsg('cfgMsg', 'Settings saved.', 'ok'); toast('Settings saved'); }
+}
+function loadConfigIntoForm() {
+  $('cfgSupabaseUrl').value = CFG.supabaseUrl || '';
+  $('cfgAnonKey').value = CFG.anonKey || '';
+  $('cfgAdminEmail').value = CFG.adminEmail || '';
+  $('cfgAdminPassword').value = CFG.adminPassword || '';
+  $('cfgR2AccountId').value = CFG.r2AccountId || '';
+  $('cfgR2AccessKey').value = CFG.r2AccessKey || '';
+  $('cfgR2SecretKey').value = CFG.r2SecretKey || '';
+  $('cfgR2Bucket').value = CFG.r2Bucket || '';
+  $('cfgR2PublicBase').value = CFG.r2PublicBase || '';
+}
+
+/* Gate: first run sets a password; later runs ask for it. Hash only, never the password. */
+async function initGate() {
+  const stored = localStorage.getItem(LS_GATE);
+  if (!stored) {
+    $('gateTitle').textContent = 'Set admin password';
+    $('gateHint').textContent = 'First run: choose a password for this admin panel (stored hashed in this browser only).';
+    $('gateBtn').textContent = 'Set password';
+  }
+  const tryUnlock = async () => {
+    const pw = $('gatePassword').value;
+    if (!pw) { setMsg('gateMsg', 'Enter a password.', 'err'); return; }
+    const hash = await sha256hex('mmt-gate::' + pw);
+    const existing = localStorage.getItem(LS_GATE);
+    if (!existing) {
+      localStorage.setItem(LS_GATE, hash);
+      unlock();
+      toast('Password set — welcome!');
+    } else if (hash === existing) {
+      unlock();
+    } else {
+      setMsg('gateMsg', 'Wrong password.', 'err');
+    }
+  };
+  $('gateBtn').onclick = tryUnlock;
+  $('gatePassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
+  $('gatePassword').focus();
+}
+function unlock() {
+  $('gate').style.display = 'none';
+  $('app').style.display = 'block';
+  loadConfigIntoForm();
+  testConnections(true); // quiet auto-check on unlock
+}
+$('btnChangeGate').onclick = async () => {
+  const pw = $('newGatePassword').value;
+  if (!pw || pw.length < 4) { setMsg('gateMsg2', 'Use at least 4 characters.', 'err'); return; }
+  localStorage.setItem(LS_GATE, await sha256hex('mmt-gate::' + pw));
+  $('newGatePassword').value = '';
+  setMsg('gateMsg2', 'Panel password changed.', 'ok');
+};
+
+/* ---------------- C. Supabase + R2 clients, connection status ---------------- */
+let supa = null;   // supabase-js client
+let s3 = null;     // S3Client pointed at the R2 endpoint
+
+function buildClients() {
+  supa = null; s3 = null;
+  if (CFG.supabaseUrl && CFG.anonKey) {
+    try { supa = createClient(CFG.supabaseUrl, CFG.anonKey); } catch (e) { console.warn('supabase init failed', e); }
+  }
+  if (CFG.r2AccountId && CFG.r2AccessKey && CFG.r2SecretKey) {
+    try {
+      s3 = new S3Client({
+        region: 'auto',
+        endpoint: `https://${CFG.r2AccountId}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId: CFG.r2AccessKey, secretAccessKey: CFG.r2SecretKey },
+      });
+    } catch (e) { console.warn('r2 init failed', e); }
+  }
+  refreshAuthStatus();
+}
+function setDot(id, state) { // state: ok | bad | wait
+  const el = $(id);
+  el.className = 'dot ' + state;
+}
+function refreshAuthStatus() {
+  // supabase-js v2 keeps the session; report it if we can without awaiting everywhere.
+  if (!supa) { $('authStatus').textContent = 'Not signed in.'; return; }
+  supa.auth.getSession().then(({ data }) => {
+    $('authStatus').textContent = data.session
+      ? 'Signed in as ' + (data.session.user.email || 'admin') + '.'
+      : 'Not signed in.';
+  }).catch(() => { $('authStatus').textContent = 'Not signed in.'; });
+}
+$('btnSignIn').onclick = async () => {
+  setMsg('cfgMsg', '');
+  saveConfig(true);
+  if (!supa) { setMsg('cfgMsg', 'Set the Supabase URL + anon key first.', 'err'); return; }
+  if (!CFG.adminEmail || !CFG.adminPassword) { setMsg('cfgMsg', 'Enter the admin email + password first.', 'err'); return; }
+  try {
+    const { error } = await supa.auth.signInWithPassword({ email: CFG.adminEmail, password: CFG.adminPassword });
+    if (error) throw error;
+    setMsg('cfgMsg', 'Signed in as admin.', 'ok');
+  } catch (e) {
+    setMsg('cfgMsg', 'Sign-in failed: ' + friendlyError(e), 'err');
+  }
+  refreshAuthStatus();
+};
+
+/** Test Supabase (SELECT 1 row from series) and R2 (list 1 object). Updates the header dots. */
+async function testConnections(quiet) {
+  setDot('statusSupabase', 'wait'); setDot('statusR2', 'wait');
+  if (!quiet) setMsg('cfgMsg', 'Testing connections…');
+  buildClients();
+  let sOk = false, rOk = false, sErr = '', rErr = '';
+  if (supa) {
+    try {
+      const { error } = await supa.from('series').select('id', { count: 'exact', head: true });
+      if (error) throw error;
+      sOk = true;
+    } catch (e) { sErr = friendlyError(e); }
+  } else sErr = 'Supabase URL / anon key missing.';
+  if (s3 && CFG.r2Bucket) {
+    try {
+      await s3.send(new ListObjectsV2Command({ Bucket: CFG.r2Bucket, MaxKeys: 1 }));
+      rOk = true;
+    } catch (e) { rErr = friendlyError(e); }
+  } else rErr = 'R2 account / keys / bucket missing.';
+  setDot('statusSupabase', sOk ? 'ok' : 'bad');
+  setDot('statusR2', rOk ? 'ok' : 'bad');
+  if (!quiet) {
+    const parts = [];
+    parts.push(sOk ? 'Supabase: reachable.' : 'Supabase FAILED: ' + sErr);
+    parts.push(rOk ? 'R2: reachable.' : 'R2 FAILED: ' + rErr);
+    setMsg('cfgMsg', parts.join(' '), (sOk && rOk) ? 'ok' : 'err');
+  }
+}
+$('btnSaveConfig').onclick = () => { saveConfig(false); testConnections(true); };
+$('btnTestConn').onclick = () => testConnections(false);
+
+/** Human-friendly error text for Supabase / AWS / network failures. */
+function friendlyError(e) {
+  if (!e) return 'Unknown error';
+  const msg = e.message || String(e);
+  if (/Failed to fetch|NetworkError|Load failed/i.test(msg))
+    return 'Network/CORS error — check the URL, your internet, and (for R2) the bucket CORS rule. Details: ' + msg;
+  if (/CORS/i.test(msg)) return 'CORS blocked — add this page origin to the R2 bucket CORS policy. Details: ' + msg;
+  return msg;
+}
+/** Guard: need an authenticated Supabase session for writes (RLS). */
+async function requireAdmin() {
+  if (!supa) throw new Error('Supabase is not configured (Config tab).');
+  const { data } = await supa.auth.getSession();
+  if (!data.session) throw new Error('Not signed in as admin — go to the Config tab and sign in.');
+  return data.session;
+}
+function requireR2() {
+  if (!s3 || !CFG.r2Bucket) throw new Error('R2 is not configured (Config tab).');
+  if (!CFG.r2PublicBase) throw new Error('R2 public base URL is not set (Config tab).');
+}
+const r2Url = (key) => CFG.r2PublicBase + '/' + key;
+/** Extract the R2 object key back from a public URL (for optional deletes). */
+function keyFromUrl(url) {
+  if (!url || !CFG.r2PublicBase) return null;
+  return url.startsWith(CFG.r2PublicBase + '/') ? url.slice(CFG.r2PublicBase.length + 1) : null;
+}
+
+/* ---------------- D. tab navigation ---------------- */
+document.querySelectorAll('nav.tabs button').forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('section.tab').forEach((s) => s.classList.remove('active'));
+    btn.classList.add('active');
+    const sec = $('tab-' + btn.dataset.tab);
+    sec.classList.add('active');
+    // Lazy-load tab data on first open
+    if (btn.dataset.tab === 'upload' && !$('upSeries').dataset.loaded) loadSeriesDropdowns();
+    if (btn.dataset.tab === 'cut' && !$('cutSeries').dataset.loaded) loadCutSeries();
+    if (btn.dataset.tab === 'analytics' && !$('anSeries').dataset.loaded) loadAnalyticsSeries();
+    if (btn.dataset.tab === 'content' && !$('contentList').dataset.loaded) loadContent();
+  };
+});
+
+/* ---------------- E. Upload tab ---------------- */
+const upState = { file: null, thumbBlob: null, thumbObjectUrl: null, uploading: false };
+
+async function fetchSeries() {
+  if (!supa) throw new Error('Supabase is not configured (Config tab).');
+  const { data, error } = await supa.from('series').select('id,title,category').order('created_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+async function loadSeriesDropdowns() {
+  const sel = $('upSeries');
+  sel.innerHTML = '<option value="__new__">＋ Create new series…</option>';
+  try {
+    const rows = await fetchSeries();
+    rows.forEach((r) => {
+      const o = document.createElement('option');
+      o.value = r.id; o.textContent = r.title; o.dataset.category = r.category || '';
+      sel.appendChild(o);
+    });
+    sel.dataset.loaded = '1';
+    onUpSeriesChange();
+  } catch (e) {
+    sel.innerHTML = '<option value="">Failed to load series</option>';
+    setMsg('upMsg', 'Could not load series: ' + friendlyError(e), 'err');
+  }
+}
+async function onUpSeriesChange() {
+  const sel = $('upSeries');
+  const isNew = sel.value === '__new__';
+  $('newSeriesFields').style.display = isNew ? 'block' : 'none';
+  $('upCategory').disabled = !isNew;
+  $('upCategory').title = isNew ? '' : 'Category lives on the series — edit it in the Content tab.';
+  if (!isNew && sel.value && supa) {
+    $('upCategory').value = sel.selectedOptions[0]?.dataset.category || '';
+    // auto-suggest next part number
+    try {
+      const { data, error } = await supa.from('parts')
+        .select('part_number').eq('series_id', sel.value)
+        .order('part_number', { ascending: false }).limit(1);
+      if (!error && data && data.length) $('upPartNumber').value = data[0].part_number + 1;
+    } catch (e) { /* non-fatal */ }
+  } else if (isNew) {
+    $('upCategory').value = ''; $('upPartNumber').value = 1;
+  }
+}
+$('upSeries').addEventListener('change', onUpSeriesChange);
+
+/* --- video file picked: preview + auto thumbnail --- */
+$('upFile').addEventListener('change', () => {
+  const f = $('upFile').files[0];
+  setMsg('upMsg', ''); $('upResult').innerHTML = '';
+  if (!f) return;
+  if (!f.type.startsWith('video/')) { setMsg('upMsg', 'Please pick a video file.', 'err'); return; }
+  upState.file = f;
+  const url = URL.createObjectURL(f);
+  const pv = $('upVideoPreview');
+  pv.src = url; pv.style.display = 'block';
+  captureThumbnail(url);
+});
+/** Draw the video frame at ~10% duration onto a canvas and keep a JPEG blob. */
+function captureThumbnail(objectUrl) {
+  const v = $('thumbVideo');
+  v.onloadedmetadata = () => {
+    const t = Math.min(Math.max((v.duration || 0) * 0.1, 0.5), Math.max((v.duration || 0) - 0.5, 0.5));
+    v.currentTime = isFinite(t) ? t : 0.5;
+  };
+  v.onseeked = () => {
+    try {
+      const c = $('thumbCanvas');
+      const w = 480, h = Math.round((v.videoHeight / v.videoWidth) * w) || 270;
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(v, 0, 0, w, h);
+      c.toBlob((blob) => {
+        if (!blob) return;
+        upState.thumbBlob = blob;
+        if (upState.thumbObjectUrl) URL.revokeObjectURL(upState.thumbObjectUrl);
+        upState.thumbObjectUrl = URL.createObjectURL(blob);
+        $('thumbPreview').src = upState.thumbObjectUrl;
+        $('thumbPreview').style.display = 'block';
+        toast('Thumbnail captured');
+      }, 'image/jpeg', 0.82);
+    } catch (e) { setMsg('upMsg', 'Thumbnail capture failed: ' + friendlyError(e), 'err'); }
+  };
+  v.onerror = () => setMsg('upMsg', 'Could not read this video file for thumbnail capture.', 'err');
+  v.src = objectUrl;
+}
+$('btnRecaptureThumb').onclick = () => {
+  if (!upState.file) { setMsg('upMsg', 'Pick a video file first.', 'err'); return; }
+  captureThumbnail(URL.createObjectURL(upState.file));
+};
+$('thumbReplace').addEventListener('change', () => {
+  const f = $('thumbReplace').files[0];
+  if (!f || !f.type.startsWith('image/')) return;
+  upState.thumbBlob = f;
+  if (upState.thumbObjectUrl) URL.revokeObjectURL(upState.thumbObjectUrl);
+  upState.thumbObjectUrl = URL.createObjectURL(f);
+  $('thumbPreview').src = upState.thumbObjectUrl;
+  $('thumbPreview').style.display = 'block';
+  toast('Thumbnail replaced with your image');
+});
+
+/** Upload a Blob/File to R2 under `key`, with progress callback (0..1). Returns the key. */
+async function uploadToR2(fileOrBlob, key, contentType, onProgress) {
+  requireR2();
+  const upload = new Upload({
+    client: s3,
+    params: { Bucket: CFG.r2Bucket, Key: key, Body: fileOrBlob, ContentType: contentType },
+    queueSize: 4,
+    partSize: 8 * 1024 * 1024,
+    leavePartsOnError: false,
+  });
+  upload.on('httpUploadProgress', (p) => {
+    if (p.total && onProgress) onProgress((p.loaded || 0) / p.total);
+  });
+  await upload.done();
+  return key;
+}
+function safeName(name) {
+  return String(name || 'file').replace(/[^\w.\-]+/g, '_').slice(0, 80);
+}
+
+$('btnUpload').onclick = async () => {
+  if (upState.uploading) return;
+  setMsg('upMsg', ''); $('upResult').innerHTML = '';
+  try {
+    if (!upState.file) throw new Error('Pick a video file first.');
+    const title = $('upTitle').value.trim();
+    if (!title) throw new Error('Enter a part title.');
+    const partNumber = parseInt($('upPartNumber').value, 10);
+    if (!partNumber || partNumber < 1) throw new Error('Part number must be 1 or higher.');
+    const seriesSel = $('upSeries').value;
+    const isNewSeries = seriesSel === '__new__' || !seriesSel;
+    if (isNewSeries && !$('nsTitle').value.trim()) throw new Error('Enter the new series title.');
+    await requireAdmin();
+    requireR2();
+
+    upState.uploading = true;
+    $('btnUpload').disabled = true;
+    $('upProgressWrap').style.display = 'block';
+    const setP = (frac, label) => {
+      $('upProgress').style.width = Math.round(frac * 100) + '%';
+      $('upProgressLabel').textContent = label;
+    };
+
+    const stamp = Date.now();
+    // 1) upload video
+    setP(0, 'Uploading video…');
+    const videoKey = `videos/${stamp}-${safeName(upState.file.name)}`;
+    await uploadToR2(upState.file, videoKey, upState.file.type || 'video/mp4', (f) => setP(f * 0.85, `Uploading video… ${Math.round(f * 100)}%`));
+    const videoUrl = r2Url(videoKey);
+
+    // 2) upload thumbnail (if we have one)
+    let thumbUrl = null;
+    if (upState.thumbBlob) {
+      setP(0.87, 'Uploading thumbnail…');
+      const thumbKey = `thumbs/${stamp}.jpg`;
+      await uploadToR2(upState.thumbBlob, thumbKey, 'image/jpeg', (f) => setP(0.85 + f * 0.07, 'Uploading thumbnail…'));
+      thumbUrl = r2Url(thumbKey);
+    }
+
+    // 3) resolve series (existing or create)
+    setP(0.94, 'Saving to database…');
+    let seriesId = seriesSel;
+    if (isNewSeries) {
+      let posterUrl = null;
+      const pf = $('nsPosterFile').files[0];
+      if (pf) {
+        const pk = `posters/${stamp}-${safeName(pf.name)}`;
+        await uploadToR2(pf, pk, pf.type || 'image/jpeg', null);
+        posterUrl = r2Url(pk);
+      }
+      const { data, error } = await supa.from('series').insert({
+        title: $('nsTitle').value.trim(),
+        description: $('nsDescription').value.trim() || null,
+        category: $('nsCategory').value.trim() || $('upCategory').value.trim() || null,
+        poster_url: posterUrl,
+        is_ai_generated: $('upAi').checked,
+      }).select('id').single();
+      if (error) throw error;
+      seriesId = data.id;
+    }
+
+    // 4) insert or update the part (same series + part_number = update)
+    const partRow = {
+      series_id: seriesId,
+      part_number: partNumber,
+      title,
+      description: $('upDescription').value.trim() || null,
+      video_url: videoUrl,
+      thumbnail_url: thumbUrl,
+      published: $('upPublished').checked,
+      views_count: 0,
+    };
+    const { data: existing, error: selErr } = await supa.from('parts')
+      .select('id').eq('series_id', seriesId).eq('part_number', partNumber).maybeSingle();
+    if (selErr) throw selErr;
+    let partId;
+    if (existing) {
+      // keep the old thumbnail if no new one was captured
+      if (!thumbUrl) delete partRow.thumbnail_url;
+      const { error } = await supa.from('parts').update(partRow).eq('id', existing.id);
+      if (error) throw error;
+      partId = existing.id;
+    } else {
+      const { data, error } = await supa.from('parts').insert(partRow).select('id').single();
+      if (error) throw error;
+      partId = data.id;
+    }
+
+    setP(1, 'Done.');
+    setMsg('upMsg', existing ? 'Part updated successfully.' : 'Part uploaded and saved.', 'ok');
+    $('upResult').innerHTML =
+      `<h3>Public URLs</h3>
+       <div class="kv">Video URL:</div><code class="url">${esc(videoUrl)}</code>` +
+      (thumbUrl ? `<div class="kv">Thumbnail URL:</div><code class="url">${esc(thumbUrl)}</code>` : '') +
+      `<div class="kv">Part ID: <b>${esc(partId)}</b> · Series ID: <b>${esc(seriesId)}</b> · Part ${partNumber}</div>`;
+    // refresh dropdown caches so the new series/part shows up elsewhere
+    delete $('upSeries').dataset.loaded; delete $('cutSeries').dataset.loaded;
+    delete $('anSeries').dataset.loaded; delete $('contentList').dataset.loaded;
+  } catch (e) {
+    setMsg('upMsg', 'Upload failed: ' + friendlyError(e), 'err');
+  } finally {
+    upState.uploading = false;
+    $('btnUpload').disabled = false;
+  }
+};
+
+/* ---------------- F. Cut-points tab ---------------- */
+const cut = { partId: null, partNumber: 1, duration: 0, start: 0, end: 0, videoUrl: '' };
+
+async function loadCutSeries() {
+  const sel = $('cutSeries');
+  sel.innerHTML = '<option value="">— select series —</option>';
+  try {
+    const rows = await fetchSeries();
+    rows.forEach((r) => {
+      const o = document.createElement('option');
+      o.value = r.id; o.textContent = r.title;
+      sel.appendChild(o);
+    });
+    sel.dataset.loaded = '1';
+  } catch (e) { setMsg('cutMsg', 'Could not load series: ' + friendlyError(e), 'err'); }
+}
+$('cutSeries').addEventListener('change', async () => {
+  const sid = $('cutSeries').value;
+  const psel = $('cutParts');
+  psel.innerHTML = '<option value="">— select part —</option>';
+  cut.partId = null;
+  if (!sid || !supa) return;
+  try {
+    const { data, error } = await supa.from('parts')
+      .select('id,part_number,title,start_ms,end_ms,video_url')
+      .eq('series_id', sid).order('part_number');
+    if (error) throw error;
+    (data || []).forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = `Part ${p.part_number} — ${p.title}`;
+      o.dataset.row = JSON.stringify(p);
+      psel.appendChild(o);
+    });
+    if (!data || !data.length) setMsg('cutMsg', 'This series has no parts yet.', 'err');
+    else setMsg('cutMsg', '');
+  } catch (e) { setMsg('cutMsg', 'Could not load parts: ' + friendlyError(e), 'err'); }
+});
+$('cutParts').addEventListener('change', () => {
+  const opt = $('cutParts').selectedOptions[0];
+  setMsg('cutMsg', '');
+  if (!opt || !opt.dataset.row) { cut.partId = null; return; }
+  const p = JSON.parse(opt.dataset.row);
+  cut.partId = p.id; cut.partNumber = p.part_number; cut.videoUrl = p.video_url || '';
+  cut.start = (p.start_ms || 0) / 1000; cut.end = (p.end_ms || 0) / 1000;
+  $('cutPartTitle').textContent = `Part ${p.part_number} — ${p.title}`;
+  const v = $('cutVideo');
+  v.onloadedmetadata = () => {
+    cut.duration = v.duration || 0;
+    if (cut.end <= 0 || cut.end > cut.duration) cut.end = cut.duration;
+    if (cut.start >= cut.end) cut.start = 0;
+    drawTicks(); renderCut();
+  };
+  v.src = cut.videoUrl;
+});
+
+/** Draw second ticks + labels under the timeline. */
+function drawTicks() {
+  document.querySelectorAll('#timeline .tick, #timeline .ticklabel').forEach((el) => el.remove());
+  const tl = $('timeline');
+  if (!cut.duration) return;
+  const step = cut.duration > 600 ? 120 : 60;
+  for (let s = 0; s <= cut.duration; s += step) {
+    const frac = s / cut.duration;
+    const tick = document.createElement('div');
+    tick.className = 'tick'; tick.style.left = (frac * 100) + '%';
+    const lab = document.createElement('div');
+    lab.className = 'ticklabel'; lab.style.left = (frac * 100) + '%';
+    lab.textContent = fmtTime(s);
+    tl.appendChild(tick); tl.appendChild(lab);
+  }
+}
+/** Sync markers, selection band and text inputs from cut.start / cut.end. */
+function renderCut() {
+  const d = cut.duration || 1;
+  const sf = Math.min(Math.max(cut.start / d, 0), 1);
+  const ef = Math.min(Math.max(cut.end / d, 0), 1);
+  $('markerStart').style.left = (sf * 100) + '%';
+  $('markerEnd').style.left = (ef * 100) + '%';
+  const sel = $('timelineSel');
+  sel.style.left = (sf * 100) + '%';
+  sel.style.width = Math.max(ef - sf, 0) * 100 + '%';
+  if (document.activeElement !== $('cutStartInput')) $('cutStartInput').value = fmtTime(cut.start);
+  if (document.activeElement !== $('cutEndInput')) $('cutEndInput').value = fmtTime(cut.end);
+}
+/* Draggable markers */
+function makeDraggable(markerEl, which) {
+  markerEl.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    markerEl.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const rect = $('timeline').getBoundingClientRect();
+      let frac = (ev.clientX - rect.left) / rect.width;
+      frac = Math.min(Math.max(frac, 0), 1);
+      const sec = frac * (cut.duration || 0);
+      if (which === 'start') cut.start = Math.min(sec, Math.max(cut.end - 1, 0));
+      else cut.end = Math.max(sec, Math.min(cut.start + 1, cut.duration || 0));
+      renderCut();
+    };
+    const up = () => {
+      markerEl.removeEventListener('pointermove', move);
+      markerEl.removeEventListener('pointerup', up);
+    };
+    markerEl.addEventListener('pointermove', move);
+    markerEl.addEventListener('pointerup', up);
+  });
+}
+makeDraggable($('markerStart'), 'start');
+makeDraggable($('markerEnd'), 'end');
+$('cutStartInput').addEventListener('change', () => {
+  const s = parseTime($('cutStartInput').value);
+  if (isNaN(s)) { setMsg('cutMsg', 'Start time must look like mm:ss (e.g. 1:30).', 'err'); renderCut(); return; }
+  cut.start = Math.min(Math.max(s, 0), Math.max(cut.end - 1, 0));
+  renderCut();
+});
+$('cutEndInput').addEventListener('change', () => {
+  const s = parseTime($('cutEndInput').value);
+  if (isNaN(s)) { setMsg('cutMsg', 'End time must look like mm:ss (e.g. 2:45).', 'err'); renderCut(); return; }
+  cut.end = Math.max(Math.min(s, cut.duration || s), Math.min(cut.start + 1, cut.duration || s));
+  renderCut();
+});
+/** Auto-suggest: Part 1 = 0–180s, then 60s segments (Part 2: 180–240, …). */
+$('btnAutoSuggest').onclick = () => {
+  if (!cut.partId) { setMsg('cutMsg', 'Pick a part first.', 'err'); return; }
+  if (!cut.duration) { setMsg('cutMsg', 'Video metadata not loaded yet — wait a moment.', 'err'); return; }
+  const n = cut.partNumber;
+  let s = n === 1 ? 0 : 180 + (n - 2) * 60;
+  let e = n === 1 ? 180 : 180 + (n - 1) * 60;
+  if (s >= cut.duration) { setMsg('cutMsg', `Video is only ${fmtTime(cut.duration)} long — auto-suggest ran past the end.`, 'err'); return; }
+  cut.start = s; cut.end = Math.min(e, cut.duration);
+  renderCut();
+  setMsg('cutMsg', `Suggested ${fmtTime(cut.start)} – ${fmtTime(cut.end)} for Part ${n}. Hit Save.`, 'ok');
+};
+/** Preview: play from 10s before start to 10s after end. */
+$('btnPreview').onclick = () => {
+  if (!cut.partId) { setMsg('cutMsg', 'Pick a part first.', 'err'); return; }
+  const v = $('cutVideo');
+  const from = Math.max(cut.start - 10, 0);
+  const to = cut.end + 10;
+  const stopAt = () => { if (v.currentTime >= to) { v.pause(); v.removeEventListener('timeupdate', stopAt); } };
+  v.removeEventListener('timeupdate', stopAt);
+  v.addEventListener('timeupdate', stopAt);
+  v.currentTime = from;
+  v.play().catch(() => setMsg('cutMsg', 'Preview play was blocked by the browser.', 'err'));
+};
+$('btnSaveCut').onclick = async () => {
+  setMsg('cutMsg', '');
+  try {
+    if (!cut.partId) throw new Error('Pick a part first.');
+    if (cut.end <= cut.start) throw new Error('End must be after start.');
+    await requireAdmin();
+    const { error } = await supa.from('parts').update({
+      start_ms: Math.round(cut.start * 1000),
+      end_ms: Math.round(cut.end * 1000),
+    }).eq('id', cut.partId);
+    if (error) throw error;
+    setMsg('cutMsg', `Saved: ${fmtTime(cut.start)} – ${fmtTime(cut.end)} (${cut.end - cut.start}s segment).`, 'ok');
+    toast('Cut points saved');
+  } catch (e) { setMsg('cutMsg', 'Save failed: ' + friendlyError(e), 'err'); }
+};
+
+/* ---------------- G. Analytics tab ---------------- */
+let charts = {};
+function destroyCharts() {
+  Object.values(charts).forEach((c) => { try { c.destroy(); } catch (e) {} });
+  charts = {};
+}
+const CHART_COLORS = ['#4da3ff', '#f2c14e', '#3ddc84', '#ff8a5c', '#b48aff', '#5cd6ff'];
+
+async function loadAnalyticsSeries() {
+  const sel = $('anSeries');
+  sel.innerHTML = '<option value="">— select series —</option>';
+  try {
+    const rows = await fetchSeries();
+    rows.forEach((r) => {
+      const o = document.createElement('option');
+      o.value = r.id; o.textContent = r.title;
+      sel.appendChild(o);
+    });
+    sel.dataset.loaded = '1';
+  } catch (e) { /* series dropdown optional; funnel just won't have choices */ }
+  runAnalytics();
+}
+$('anSeries').addEventListener('change', runAnalytics);
+$('btnRefreshAnalytics').onclick = runAnalytics;
+
+/** Fetch up to 50k view_events since `since` (paged). */
+async function fetchViewEvents(since) {
+  const rows = [];
+  const PAGE = 1000;
+  for (let i = 0; i < 50; i++) {
+    const { data, error } = await supa.from('view_events')
+      .select('part_id,created_at').gte('created_at', since.toISOString())
+      .order('created_at', { ascending: true }).range(i * PAGE, (i + 1) * PAGE - 1);
+    if (error) throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+  return rows;
+}
+
+async function runAnalytics() {
+  setMsg('anMsg', '');
+  if (typeof Chart === 'undefined') {
+    setMsg('anMsg', 'Chart.js failed to load (CDN blocked?). Check your connection and refresh.', 'err');
+    return;
+  }
+  try {
+    if (!supa) throw new Error('Supabase is not configured (Config tab).');
+    setMsg('anMsg', 'Loading…');
+    const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+
+    const [seriesRes, partsRes] = await Promise.all([
+      supa.from('series').select('id,title'),
+      supa.from('parts').select('id,series_id,part_number,title,views_count,published'),
+    ]);
+    if (seriesRes.error) throw seriesRes.error;
+    if (partsRes.error) throw partsRes.error;
+    const series = seriesRes.data || [];
+    const parts = partsRes.data || [];
+    let events = [];
+    try { events = await fetchViewEvents(since); }
+    catch (e) { console.warn('view_events fetch failed', e); /* RLS may block anon; keep going with views_count */ }
+
+    const seriesTitle = Object.fromEntries(series.map((s) => [s.id, s.title]));
+    const partSeries = Object.fromEntries(parts.map((p) => [p.id, p.series_id]));
+
+    // stat cards
+    $('statViews').textContent = events.length.toLocaleString();
+    $('statSeries').textContent = series.length.toLocaleString();
+    $('statParts').textContent = parts.length.toLocaleString();
+    $('statPublished').textContent = parts.filter((p) => p.published).length.toLocaleString();
+
+    destroyCharts();
+    const gridColor = '#ffffff14', tickColor = '#9aa4b2';
+    const baseOpts = {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: tickColor }, grid: { color: gridColor } },
+        y: { beginAtZero: true, ticks: { color: tickColor, precision: 0 }, grid: { color: gridColor } },
+      },
+    };
+
+    if (!events.length && !parts.length) {
+      setMsg('anMsg', 'No data yet — upload a series and the charts will fill in.', '');
+      return;
+    }
+
+    // (a) views per day, last 30 days
+    const days = [], dayCount = {};
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 3600 * 1000);
+      const key = d.toISOString().slice(0, 10);
+      days.push({ key, label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) });
+      dayCount[key] = 0;
+    }
+    events.forEach((ev) => {
+      const k = new Date(ev.created_at).toISOString().slice(0, 10);
+      if (k in dayCount) dayCount[k]++;
+    });
+    charts.daily = new Chart($('chartDaily'), {
+      type: 'line',
+      data: { labels: days.map((d) => d.label), datasets: [{ data: days.map((d) => dayCount[d.key]), borderColor: '#4da3ff', backgroundColor: 'rgba(77,163,255,.15)', fill: true, tension: 0.3 }] },
+      options: baseOpts,
+    });
+
+    // (b) views per series (30d, joined via parts)
+    const perSeries = {};
+    events.forEach((ev) => {
+      const sid = partSeries[ev.part_id];
+      if (sid) perSeries[sid] = (perSeries[sid] || 0) + 1;
+    });
+    const sIds = Object.keys(perSeries).sort((a, b) => perSeries[b] - perSeries[a]).slice(0, 12);
+    charts.series = new Chart($('chartSeries'), {
+      type: 'bar',
+      data: { labels: sIds.map((id) => seriesTitle[id] || id.slice(0, 8)), datasets: [{ data: sIds.map((id) => perSeries[id]), backgroundColor: CHART_COLORS }] },
+      options: { ...baseOpts, indexAxis: 'y' },
+    });
+
+    // (c) drop-off funnel: views per part_number for the selected series
+    let funnelSid = $('anSeries').value || (series[0] && series[0].id);
+    if (funnelSid) {
+      if (!$('anSeries').value) $('anSeries').value = funnelSid;
+      const fp = parts.filter((p) => p.series_id === funnelSid).sort((a, b) => a.part_number - b.part_number);
+      charts.funnel = new Chart($('chartFunnel'), {
+        type: 'bar',
+        data: {
+          labels: fp.map((p) => 'Part ' + p.part_number),
+          datasets: [{ data: fp.map((p) => p.views_count || 0), backgroundColor: '#3ddc84' }],
+        },
+        options: baseOpts,
+      });
+    }
+
+    // (d) top 10 parts by views_count (all time)
+    const top = [...parts].sort((a, b) => (b.views_count || 0) - (a.views_count || 0)).slice(0, 10);
+    charts.top = new Chart($('chartTop'), {
+      type: 'bar',
+      data: {
+        labels: top.map((p) => `${(seriesTitle[p.series_id] || '?').slice(0, 18)} · P${p.part_number}`),
+        datasets: [{ data: top.map((p) => p.views_count || 0), backgroundColor: '#f2c14e' }],
+      },
+      options: { ...baseOpts, indexAxis: 'y' },
+    });
+
+    setMsg('anMsg', events.length ? '' : 'No view_events in the last 30 days — daily/series charts use view_events; funnel + top 10 use views_count.', '');
+  } catch (e) {
+    setMsg('anMsg', 'Analytics failed: ' + friendlyError(e), 'err');
+  }
+}
+
+/* ---------------- H. Content tab ---------------- */
+let contentCache = []; // [{...series, parts:[...]}]
+
+async function loadContent() {
+  setMsg('contentMsg', 'Loading…');
+  try {
+    if (!supa) throw new Error('Supabase is not configured (Config tab).');
+    const { data: sData, error: sErr } = await supa.from('series')
+      .select('id,title,description,category,poster_url,is_ai_generated,created_at').order('created_at', { ascending: false });
+    if (sErr) throw sErr;
+    const { data: pData, error: pErr } = await supa.from('parts')
+      .select('id,series_id,part_number,title,description,video_url,thumbnail_url,start_ms,end_ms,published,views_count')
+      .order('part_number');
+    if (pErr) throw pErr;
+    const bySeries = {};
+    (pData || []).forEach((p) => { (bySeries[p.series_id] = bySeries[p.series_id] || []).push(p); });
+    contentCache = (sData || []).map((s) => ({ ...s, parts: bySeries[s.id] || [] }));
+    renderContent();
+    $('contentList').dataset.loaded = '1';
+    setMsg('contentMsg', '');
+  } catch (e) { setMsg('contentMsg', 'Load failed: ' + friendlyError(e), 'err'); }
+}
+$('btnReloadContent').onclick = loadContent;
+
+function renderContent() {
+  const box = $('contentList');
+  if (!contentCache.length) { box.innerHTML = '<div class="empty">No series yet — upload your first video in the Upload tab.</div>'; return; }
+  box.innerHTML = contentCache.map((s) => `
+    <div class="series" data-sid="${esc(s.id)}">
+      <div class="series-head" data-act="toggle">
+        ${s.poster_url ? `<img src="${esc(s.poster_url)}" alt="">` : ''}
+        <div class="t"><b>${esc(s.title)}</b>
+          <span>${esc(s.category || 'Uncategorized')} · ${s.parts.length} part(s)${s.is_ai_generated ? '<span class="badge ai">AI</span>' : ''}</span>
+        </div>
+        <button class="btn ghost small" data-act="edit-series">Edit</button>
+        <button class="btn danger small" data-act="del-series">Delete</button>
+      </div>
+      <div class="parts">
+        ${s.parts.map((p) => `
+          <div class="part" data-pid="${esc(p.id)}">
+            ${p.thumbnail_url ? `<img src="${esc(p.thumbnail_url)}" alt="">` : '<div style="width:64px;height:36px;background:#000;border-radius:4px"></div>'}
+            <div class="info">
+              <b>Part ${p.part_number} — ${esc(p.title)}</b>
+              ${p.published ? '<span class="badge pub">Published</span>' : '<span class="badge">Draft</span>'}
+              <small>${(p.views_count || 0).toLocaleString()} views · cut ${fmtTime((p.start_ms || 0) / 1000)}–${fmtTime((p.end_ms || 0) / 1000)}</small>
+            </div>
+            <button class="btn ghost small" data-act="edit-part">Edit</button>
+            <button class="btn danger small" data-act="del-part">Delete</button>
+          </div>`).join('') || '<div class="empty">No parts in this series.</div>'}
+      </div>
+    </div>`).join('');
+}
+
+/* Content actions — event delegation */
+$('contentList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+  const seriesEl = e.target.closest('.series');
+  const partEl = e.target.closest('.part');
+  if (act === 'toggle' && !e.target.closest('button')) seriesEl.classList.toggle('open');
+
+  try {
+    if (act === 'edit-part') showPartEditor(partEl);
+    else if (act === 'del-part') await deletePart(partEl);
+    else if (act === 'edit-series') showSeriesEditor(seriesEl);
+    else if (act === 'del-series') await deleteSeries(seriesEl);
+  } catch (err) { setMsg('contentMsg', friendlyError(err), 'err'); }
+});
+
+function findPart(pid) {
+  for (const s of contentCache) { const p = s.parts.find((x) => x.id === pid); if (p) return p; }
+  return null;
+}
+function showPartEditor(partEl) {
+  if (partEl.querySelector('.editform')) return;
+  const p = findPart(partEl.dataset.pid);
+  if (!p) return;
+  const div = document.createElement('div');
+  div.className = 'editform';
+  div.innerHTML = `
+    <div class="field"><label>Title</label><input type="text" data-f="title" value="${esc(p.title)}"></div>
+    <div class="field"><label>Description</label><textarea data-f="description">${esc(p.description || '')}</textarea></div>
+    <div class="switchrow"><label class="switch"><input type="checkbox" data-f="published" ${p.published ? 'checked' : ''}><span class="slider"></span></label><span>Published</span></div>
+    <div class="row">
+      <button class="btn small" data-save>Save</button>
+      <button class="btn ghost small" data-cancel>Cancel</button>
+    </div>`;
+  partEl.appendChild(div);
+  div.querySelector('[data-cancel]').onclick = () => div.remove();
+  div.querySelector('[data-save]').onclick = async () => {
+    try {
+      await requireAdmin();
+      const { error } = await supa.from('parts').update({
+        title: div.querySelector('[data-f=title]').value.trim(),
+        description: div.querySelector('[data-f=description]').value.trim() || null,
+        published: div.querySelector('[data-f=published]').checked,
+      }).eq('id', p.id);
+      if (error) throw error;
+      toast('Part updated'); loadContent();
+    } catch (err) { setMsg('contentMsg', 'Update failed: ' + friendlyError(err), 'err'); }
+  };
+}
+async function deletePart(partEl) {
+  const p = findPart(partEl.dataset.pid);
+  if (!p) return;
+  const delR2ok = confirm(`Delete "Part ${p.part_number} — ${p.title}" from the database?\n\nOK = continue.`);
+  if (!delR2ok) return;
+  // Second step: choose whether the R2 video + thumbnail objects go too.
+  const r2 = confirm('Also delete its video + thumbnail files from R2?\n\nOK = delete the R2 objects too.\nCancel = keep the R2 files, delete only the database row.');
+  await requireAdmin();
+  const { error } = await supa.from('parts').delete().eq('id', p.id);
+  if (error) throw error;
+  if (r2) {
+    const keys = [keyFromUrl(p.video_url), keyFromUrl(p.thumbnail_url)].filter(Boolean);
+    if (keys.length) await deleteR2Keys(keys);
+  }
+  toast('Part deleted'); loadContent();
+}
+function showSeriesEditor(seriesEl) {
+  if (seriesEl.querySelector('.editform')) return;
+  const s = contentCache.find((x) => x.id === seriesEl.dataset.sid);
+  if (!s) return;
+  const div = document.createElement('div');
+  div.className = 'editform';
+  div.style.margin = '0 16px 16px';
+  div.innerHTML = `
+    <div class="row">
+      <div class="field"><label>Title</label><input type="text" data-f="title" value="${esc(s.title)}"></div>
+      <div class="field"><label>Category</label><input type="text" data-f="category" value="${esc(s.category || '')}"></div>
+    </div>
+    <div class="field"><label>Description</label><textarea data-f="description">${esc(s.description || '')}</textarea></div>
+    <div class="field"><label>Poster URL</label><input type="text" data-f="poster_url" value="${esc(s.poster_url || '')}"></div>
+    <div class="switchrow"><label class="switch"><input type="checkbox" data-f="is_ai_generated" ${s.is_ai_generated ? 'checked' : ''}><span class="slider"></span></label><span>Made with AI</span></div>
+    <div class="row">
+      <button class="btn small" data-save>Save</button>
+      <button class="btn ghost small" data-cancel>Cancel</button>
+    </div>`;
+  seriesEl.appendChild(div);
+  div.querySelector('[data-cancel]').onclick = () => div.remove();
+  div.querySelector('[data-save]').onclick = async () => {
+    try {
+      await requireAdmin();
+      const { error } = await supa.from('series').update({
+        title: div.querySelector('[data-f=title]').value.trim(),
+        category: div.querySelector('[data-f=category]').value.trim() || null,
+        description: div.querySelector('[data-f=description]').value.trim() || null,
+        poster_url: div.querySelector('[data-f=poster_url]').value.trim() || null,
+        is_ai_generated: div.querySelector('[data-f=is_ai_generated]').checked,
+      }).eq('id', s.id);
+      if (error) throw error;
+      toast('Series updated'); loadContent();
+    } catch (err) { setMsg('contentMsg', 'Update failed: ' + friendlyError(err), 'err'); }
+  };
+}
+async function deleteSeries(seriesEl) {
+  const s = contentCache.find((x) => x.id === seriesEl.dataset.sid);
+  if (!s) return;
+  if (!confirm(`Delete series "${s.title}" and ALL its ${s.parts.length} part(s)?\n\nThis cannot be undone.`)) return;
+  const delR2 = confirm('Also delete all its video + thumbnail files from R2?\n\nOK = yes, delete R2 objects too.\nCancel = keep R2 files, delete DB rows only.');
+  await requireAdmin();
+  const keys = [];
+  if (delR2) {
+    s.parts.forEach((p) => {
+      const k1 = keyFromUrl(p.video_url), k2 = keyFromUrl(p.thumbnail_url);
+      if (k1) keys.push(k1); if (k2) keys.push(k2);
+    });
+  }
+  const { error: pErr } = await supa.from('parts').delete().eq('series_id', s.id);
+  if (pErr) throw pErr;
+  const { error: sErr } = await supa.from('series').delete().eq('id', s.id);
+  if (sErr) throw sErr;
+  if (keys.length) await deleteR2Keys(keys);
+  toast('Series deleted'); loadContent();
+}
+/** Batch-delete R2 objects by key. */
+async function deleteR2Keys(keys) {
+  requireR2();
+  const uniq = [...new Set(keys)].filter(Boolean);
+  for (let i = 0; i < uniq.length; i += 1000) { // S3 limit: 1000 keys per call
+    await s3.send(new DeleteObjectsCommand({
+      Bucket: CFG.r2Bucket,
+      Delete: { Objects: uniq.slice(i, i + 1000).map((k) => ({ Key: k })) },
+    }));
+  }
+}
+
+/* ---------------- init ---------------- */
+buildClients();
+initGate();
+</script>
+</body>
+</html>
