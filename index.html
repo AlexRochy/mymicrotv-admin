@@ -830,7 +830,7 @@ function captureThumbnail(objectUrl) {
   v.onseeked = () => {
     try {
       const c = $('thumbCanvas');
-      const w = 480, h = Math.round((v.videoHeight / v.videoWidth) * w) || 270;
+      const w = Math.min(v.videoWidth || 1280, 1280), h = Math.round((v.videoHeight / v.videoWidth) * w) || 720;
       c.width = w; c.height = h;
       c.getContext('2d').drawImage(v, 0, 0, w, h);
       c.toBlob((blob) => {
