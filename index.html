@@ -679,7 +679,13 @@ $('btnTestConn').onclick = () => testConnections(false);
 /** Human-friendly error text for Supabase / AWS / network failures. */
 function friendlyError(e) {
   if (!e) return 'Unknown error';
-  const msg = e.message || String(e);
+  if (typeof e === 'object') {
+    const m = e.message || e.msg || e.error_description || e.details;
+    if (m && typeof m === 'string') return m;
+    try { const s = JSON.stringify(e); if (s && s !== '{}') return s.slice(0, 300); } catch (_) {}
+    return String(e);
+  }
+  const msg = String(e);
   if (/Failed to fetch|NetworkError|Load failed/i.test(msg))
     return 'Network/CORS error — check the URL, your internet, and (for R2) the bucket CORS rule. Details: ' + msg;
   if (/CORS/i.test(msg)) return 'CORS blocked — add this page origin to the R2 bucket CORS policy. Details: ' + msg;
