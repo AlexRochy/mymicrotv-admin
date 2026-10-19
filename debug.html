@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>R2 Debug</title>
+<script type="importmap">
+{"imports": {
+  "@aws-sdk/client-s3": "https://esm.sh/@aws-sdk/client-s3@3",
+  "@aws-sdk/lib-storage": "https://esm.sh/@aws-sdk/lib-storage@3?bundle"
+}}
+</script>
+</head><body>
+<h2>R2 Debug</h2>
+<pre id="out">loading...</pre>
+<script type="module">
+import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
+const out = document.getElementById('out');
+const log = (m) => { out.textContent += '\n' + m; };
+try {
+  log('S3Client imported OK: ' + (typeof S3Client));
+  const s3 = new S3Client({
+    region: 'auto',
+    endpoint: 'https://f0c953d44b22b0b85e11359d076c80e0.r2.cloudflarestorage.com',
+    credentials: { accessKeyId: '8c7ff96b24f93d484299574ddeb2aaac', secretAccessKey: 'dummysecretvalue123' },
+  });
+  log('constructor OK, s3 truthy: ' + !!s3);
+  try {
+    await s3.send(new ListObjectsV2Command({ Bucket: 'mymicrotv-videos', MaxKeys: 1 }));
+    log('ListObjects OK');
+  } catch (e) {
+    log('ListObjects threw: ' + e.name + ' :: ' + e.message);
+  }
+} catch (e) {
+  log('FATAL: ' + e.name + ' :: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0,4).join('\n'));
+}
+// localStorage check
+try {
+  localStorage.setItem('mmt_dbg', JSON.stringify({a:1}));
+  const v = JSON.parse(localStorage.getItem('mmt_dbg'));
+  log('localStorage OK: ' + JSON.stringify(v));
+} catch (e) { log('localStorage FAILED: ' + e.message); }
+</script>
+</body></html>
