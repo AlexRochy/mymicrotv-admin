@@ -146,7 +146,7 @@
   "imports": {
     "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2",
     "@aws-sdk/client-s3": "https://esm.sh/@aws-sdk/client-s3@3?bundle",
-    "@aws-sdk/lib-storage": "https://esm.sh/@aws-sdk/lib-storage@3?bundle"
+    "@aws-sdk/s3-request-presigner": "https://esm.sh/@aws-sdk/s3-request-presigner@3?bundle"
   }
 }
 </script>
@@ -465,8 +465,8 @@
      H. Content tab
    ================================================================ */
 import { createClient } from '@supabase/supabase-js';
-import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
-import { Upload } from '@aws-sdk/lib-storage';
+import { S3Client, ListObjectsV2Command, DeleteObjectsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 /* ---------------- A. tiny helpers ---------------- */
 const $ = (id) => document.getElementById(id);
@@ -826,20 +826,25 @@ $('thumbReplace').addEventListener('change', () => {
   toast('Thumbnail replaced with your image');
 });
 
-/** Upload a Blob/File to R2 under `key`, with progress callback (0..1). Returns the key. */
+/** Upload a Blob/File to R2 under `key`, with progress callback (0..1). Returns the key.
+    Uses a presigned PUT URL + XHR (avoids multipart streaming bugs in browsers). */
 async function uploadToR2(fileOrBlob, key, contentType, onProgress) {
   requireR2();
-  const upload = new Upload({
-    client: s3,
-    params: { Bucket: CFG.r2Bucket, Key: key, Body: fileOrBlob, ContentType: contentType },
-    queueSize: 4,
-    partSize: 8 * 1024 * 1024,
-    leavePartsOnError: false,
+  const ct = contentType || 'application/octet-stream';
+  const url = await getSignedUrl(s3, new PutObjectCommand({
+    Bucket: CFG.r2Bucket, Key: key, ContentType: ct,
+  }), { expiresIn: 3600 });
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', ct);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300)
+      ? resolve()
+      : reject(new Error('Upload failed: HTTP ' + xhr.status));
+    xhr.onerror = () => reject(new Error('Upload failed: network error'));
+    xhr.send(fileOrBlob);
   });
-  upload.on('httpUploadProgress', (p) => {
-    if (p.total && onProgress) onProgress((p.loaded || 0) / p.total);
-  });
-  await upload.done();
   return key;
 }
 function safeName(name) {
