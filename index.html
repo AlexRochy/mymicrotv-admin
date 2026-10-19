@@ -1429,7 +1429,8 @@ $('contentList').addEventListener('click', async (e) => {
   } catch (err) { setMsg('contentMsg', friendlyError(err), 'err'); }
 });
 
-/** One-click publish/unpublish toggle for a part. */
+/** One-click publish/unpublish toggle for a part — updates in place,
+    keeps scroll position and expanded series. */
 async function togglePublish(partEl) {
   const p = findPart(partEl.dataset.pid);
   if (!p) return;
@@ -1437,7 +1438,14 @@ async function togglePublish(partEl) {
   const { error } = await supa.from('parts').update({ published: !p.published }).eq('id', p.id);
   if (error) throw error;
   p.published = !p.published;
-  renderContent();
+  // update this row in place (no full re-render)
+  const badge = partEl.querySelector('.badge');
+  if (badge) {
+    badge.textContent = p.published ? 'Published' : 'Draft';
+    badge.className = p.published ? 'badge pub' : 'badge';
+  }
+  const btn = partEl.querySelector('[data-act="publish-part"]');
+  if (btn) btn.textContent = p.published ? 'Unpublish' : 'Publish';
   toast(p.published ? 'Published' : 'Unpublished');
 }
 
