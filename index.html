@@ -442,7 +442,11 @@
     <div class="card">
       <h2>Content</h2>
       <p class="hint">Click a series header to expand its parts. Deleting a part can also delete its R2 video + thumbnail objects.</p>
-      <button class="btn ghost" id="btnReloadContent">⟳ Reload</button>
+      <div class="row" style="align-items:center">
+        <button class="btn ghost" id="btnReloadContent">⟳ Reload</button>
+        <button class="btn ghost" id="btnStorage">💾 Check storage</button>
+      </div>
+      <div class="msg" id="storageMsg" style="margin-top:8px"></div>
       <div class="msg" id="contentMsg"></div>
     </div>
     <div id="contentList"></div>
@@ -1380,6 +1384,31 @@ async function loadContent() {
   } catch (e) { setMsg('contentMsg', 'Load failed: ' + friendlyError(e), 'err'); }
 }
 $('btnReloadContent').onclick = loadContent;
+
+/** R2 storage meter: sum all object sizes via ListObjectsV2. Free tier = 10 GB. */
+$('btnStorage').onclick = async () => {
+  setMsg('storageMsg', 'Checking R2 storage…', '');
+  try {
+    requireR2();
+    let totalBytes = 0, count = 0, token = undefined;
+    do {
+      const out = await s3.send(new ListObjectsV2Command({
+        Bucket: CFG.r2Bucket, ContinuationToken: token, MaxKeys: 1000,
+      }));
+      (out.Contents || []).forEach((o) => { totalBytes += o.Size || 0; count++; });
+      token = out.IsTruncated ? out.NextContinuationToken : undefined;
+    } while (token);
+    const GB = 1024 ** 3;
+    const used = totalBytes / GB, limit = 10, free = limit - used;
+    const pct = Math.min(100, Math.round((used / limit) * 100));
+    const bar = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
+    setMsg('storageMsg',
+      `💾 R2 Storage: <b>${used.toFixed(2)} GB</b> used of 10 GB (${count} files) — <b>${free.toFixed(2)} GB free</b><br><code>${bar}</code> ${pct}%`,
+      pct > 90 ? 'err' : 'ok');
+  } catch (e) {
+    setMsg('storageMsg', 'Storage check failed: ' + friendlyError(e), 'err');
+  }
+};
 
 function renderContent() {
   const box = $('contentList');
