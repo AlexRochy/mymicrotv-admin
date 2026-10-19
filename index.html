@@ -187,6 +187,7 @@
     <button data-tab="cut">✂️ Cut Points</button>
     <button data-tab="analytics">📊 Analytics</button>
     <button data-tab="content">🗂️ Content</button>
+    <button data-tab="settings">🎛️ Settings</button>
   </nav>
 
   <!-- ===== TAB: CONFIG ===== -->
@@ -465,6 +466,28 @@
       <div class="msg" id="contentMsg"></div>
     </div>
     <div id="contentList"></div>
+  </section>
+
+  <!-- ===== TAB: SETTINGS ===== -->
+  <section class="tab" id="tab-settings">
+    <div class="card">
+      <h2>🎛️ App Settings</h2>
+      <p class="hint">Remote toggles — changes apply to the app instantly, no rebuild needed.</p>
+      <div class="msg" id="settingsMsg"></div>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
+        <label style="display:flex;align-items:center;justify-content:space-between;padding:12px;border:1px solid #ddd;border-radius:8px">
+          <span><b>📱 Phone OTP Login</b><br><small style="color:#666">Turn OFF before hitting 10k free SMS limit</small></span>
+          <input type="checkbox" id="setPhoneOtp" style="width:24px;height:24px">
+        </label>
+        <label style="display:flex;align-items:center;justify-content:space-between;padding:12px;border:1px solid #ddd;border-radius:8px">
+          <span><b>🔵 Google Sign-In</b><br><small style="color:#666">Free unlimited — keep ON</small></span>
+          <input type="checkbox" id="setGoogle" checked style="width:24px;height:24px">
+        </label>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="btnSaveSettings">💾 Save Settings</button>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -756,6 +779,7 @@ document.querySelectorAll('nav.tabs button').forEach((btn) => {
     if (btn.dataset.tab === 'cut' && !$('cutSeries').dataset.loaded) loadCutSeries();
     if (btn.dataset.tab === 'analytics' && !$('anSeries').dataset.loaded) loadAnalyticsSeries();
     if (btn.dataset.tab === 'content' && !$('contentList').dataset.loaded) loadContent();
+    if (btn.dataset.tab === 'settings') loadSettings();
   };
 });
 
@@ -1649,6 +1673,32 @@ async function deleteR2Keys(keys) {
 }
 
 /* ---------------- init ---------------- */
+/* ===== SETTINGS TAB: login toggles ===== */
+async function loadSettings() {
+  try {
+    await requireAdmin();
+    const { data, error } = await supa.from('app_settings').select('key,value');
+    if (error) throw error;
+    const map = Object.fromEntries((data || []).map((r) => [r.key, r.value]));
+    $('setPhoneOtp').checked = map['phone_otp_enabled'] !== 'false';
+    $('setGoogle').checked = map['google_enabled'] !== 'false';
+  } catch (err) { setMsg('settingsMsg', friendlyError(err), 'err'); }
+}
+$('btnSaveSettings').onclick = async () => {
+  try {
+    await requireAdmin();
+    const rows = [
+      { key: 'phone_otp_enabled', value: $('setPhoneOtp').checked ? 'true' : 'false' },
+      { key: 'google_enabled', value: $('setGoogle').checked ? 'true' : 'false' },
+    ];
+    for (const r of rows) {
+      const { error } = await supa.from('app_settings').upsert(r, { onConflict: 'key' });
+      if (error) throw error;
+    }
+    setMsg('settingsMsg', '✅ Settings saved!', 'ok');
+    toast('Settings saved');
+  } catch (err) { setMsg('settingsMsg', friendlyError(err), 'err'); }
+};
 buildClients();
 initGate();
 </script>
