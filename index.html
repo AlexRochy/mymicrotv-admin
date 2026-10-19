@@ -1452,6 +1452,7 @@ function renderContent() {
         <div class="t"><b>${esc(s.title)}</b>
           <span>${esc(s.category || 'Uncategorized')} · ${s.parts.length} part(s)${s.is_ai_generated ? '<span class="badge ai">AI</span>' : ''}</span>
         </div>
+        <button class="btn small" data-act="publish-all" title="Publish all drafts in this series">📢 Publish all</button>
         <button class="btn ghost small" data-act="edit-series">Edit</button>
         <button class="btn danger small" data-act="del-series">Delete</button>
       </div>
@@ -1485,10 +1486,30 @@ $('contentList').addEventListener('click', async (e) => {
     if (act === 'edit-part') showPartEditor(partEl);
     else if (act === 'del-part') await deletePart(partEl);
     else if (act === 'publish-part') await togglePublish(partEl);
+    else if (act === 'publish-all') await publishAll(seriesEl);
     else if (act === 'edit-series') showSeriesEditor(seriesEl);
     else if (act === 'del-series') await deleteSeries(seriesEl);
   } catch (err) { setMsg('contentMsg', friendlyError(err), 'err'); }
 });
+
+/** Publish all draft parts in a series with one click. */
+async function publishAll(seriesEl) {
+  const s = contentCache.find((x) => x.id === seriesEl.dataset.sid);
+  if (!s) return;
+  const drafts = s.parts.filter((p) => !p.published);
+  if (!drafts.length) { toast('All parts already published'); return; }
+  if (!confirm(`Publish all ${drafts.length} draft part(s) in "${s.title}"?`)) return;
+  await requireAdmin();
+  const ids = drafts.map((p) => p.id);
+  const { error } = await supa.from('parts').update({ published: true }).in('id', ids);
+  if (error) throw error;
+  drafts.forEach((p) => { p.published = true; });
+  renderContent();
+  // keep the series expanded
+  const el = document.querySelector(`.series[data-sid="${s.id}"]`);
+  if (el) el.classList.add('open');
+  toast(`✅ ${drafts.length} parts published`);
+}
 
 /** One-click publish/unpublish toggle for a part — updates in place,
     keeps scroll position and expanded series. */
