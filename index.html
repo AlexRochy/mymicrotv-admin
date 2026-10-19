@@ -741,7 +741,8 @@ document.querySelectorAll('nav.tabs button').forEach((btn) => {
 });
 
 /* ---------------- E. Upload tab ---------------- */
-const upState = { file: null, thumbBlob: null, thumbObjectUrl: null, uploading: false };
+const upState = { file: null, thumbBlob: null, thumbObjectUrl: null, uploading: false, duration: 0 };
+let lastUpload = null; // {seriesId, videoUrl, thumbUrl, partId, partNumber, title} — for auto-split
 
 async function fetchSeries() {
   if (!supa) throw new Error('Supabase is not configured (Config tab).');
@@ -803,6 +804,7 @@ $('upFile').addEventListener('change', () => {
 function captureThumbnail(objectUrl) {
   const v = $('thumbVideo');
   v.onloadedmetadata = () => {
+    upState.duration = v.duration || 0;
     const t = Math.min(Math.max((v.duration || 0) * 0.1, 0.5), Math.max((v.duration || 0) - 0.5, 0.5));
     v.currentTime = isFinite(t) ? t : 0.5;
   };
@@ -956,14 +958,28 @@ $('btnUpload').onclick = async () => {
 
     setP(1, 'Done.');
     setMsg('upMsg', existing ? 'Part updated successfully.' : 'Part uploaded and saved.', 'ok');
+    const durSec = Math.round(upState.duration || 0);
+    lastUpload = { seriesId, videoUrl, thumbUrl, partId, partNumber, title, duration: durSec };
     $('upResult').innerHTML =
       `<h3>Public URLs</h3>
        <div class="kv">Video URL:</div><code class="url">${esc(videoUrl)}</code>` +
       (thumbUrl ? `<div class="kv">Thumbnail URL:</div><code class="url">${esc(thumbUrl)}</code>` : '') +
-      `<div class="kv">Part ID: <b>${esc(partId)}</b> · Series ID: <b>${esc(seriesId)}</b> · Part ${partNumber}</div>`;
+      `<div class="kv">Part ID: <b>${esc(partId)}</b> · Series ID: <b>${esc(seriesId)}</b> · Part ${partNumber}</div>` +
+      (durSec > 200 ?
+        `<h3 style="margin-top:14px">✂️ Auto-split into parts</h3>
+         <p class="hint">Video is ${fmtTime(durSec)} long. Split it into Moj-style parts (one file, time markers — no re-upload).</p>
+         <div class="row">
+           <div class="field"><label>Part 1 (hook, sec)</label><input type="number" id="splitHook" value="180" min="30"></div>
+           <div class="field"><label>Other parts (sec)</label><input type="number" id="splitLen" value="60" min="15"></div>
+         </div>
+         <button class="btn" id="btnAutoSplit">✂️ Auto-split into parts</button>
+         <div class="msg" id="splitMsg"></div>`
+        : '');
     // refresh dropdown caches so the new series/part shows up elsewhere
     delete $('upSeries').dataset.loaded; delete $('cutSeries').dataset.loaded;
     delete $('anSeries').dataset.loaded; delete $('contentList').dataset.loaded;
+    const splitBtn = $('btnAutoSplit');
+    if (splitBtn) splitBtn.onclick = autoSplit;
   } catch (e) {
     setMsg('upMsg', 'Upload failed: ' + friendlyError(e), 'err');
   } finally {
@@ -973,6 +989,63 @@ $('btnUpload').onclick = async () => {
 };
 
 /* ---------------- F. Cut-points tab ---------------- */
+/** Auto-split: one uploaded video -> many DRAFT parts via time markers.
+    Part 1 = 0..hookSec, then partLen-second segments. No re-upload.
+    New parts are drafts (published=false) so he can publish one by one. */
+async function autoSplit() {
+  setMsg('splitMsg', '');
+  try {
+    if (!lastUpload) throw new Error('Upload a video first.');
+    const hookSec = Math.max(parseInt($('splitHook').value, 10) || 180, 30);
+    const partSec = Math.max(parseInt($('splitLen').value, 10) || 60, 15);
+    const total = lastUpload.duration;
+    if (!total || total <= hookSec) throw new Error('Video too short to split (need > ' + hookSec + 's).');
+    await requireAdmin();
+
+    // build segment list: [0..hook], [hook..hook+part], ...
+    const segs = [];
+    segs.push([0, Math.min(hookSec, total)]);
+    let s = hookSec;
+    while (s < total) {
+      const e = Math.min(s + partSec, total);
+      if (e - s < 10) break; // skip tiny tail
+      segs.push([s, e]);
+      s = e;
+    }
+    setMsg('splitMsg', `Creating ${segs.length} parts…`, '');
+    const { seriesId, videoUrl, thumbUrl, partId, partNumber, title } = lastUpload;
+
+    // update the uploaded part to be Part N with the hook segment
+    const { error: e1 } = await supa.from('parts').update({
+      start_ms: segs[0][0] * 1000, end_ms: segs[0][1] * 1000, published: false,
+    }).eq('id', partId);
+    if (e1) throw e1;
+
+    // create the rest as drafts
+    const rows = segs.slice(1).map((sg, i) => ({
+      series_id: seriesId,
+      part_number: partNumber + 1 + i,
+      title: title + ' (Part ' + (partNumber + 1 + i) + ')',
+      description: null,
+      video_url: videoUrl,
+      thumbnail_url: thumbUrl,
+      start_ms: sg[0] * 1000,
+      end_ms: sg[1] * 1000,
+      published: false,
+      views_count: 0,
+    }));
+    if (rows.length) {
+      const { error: e2 } = await supa.from('parts').insert(rows);
+      if (e2) throw e2;
+    }
+    setMsg('splitMsg', `✅ ${segs.length} draft parts created (Part ${partNumber}–${partNumber + segs.length - 1}). Publish them one by one from the Content tab.`, 'ok');
+    toast('Auto-split done');
+    delete $('contentList').dataset.loaded;
+  } catch (e) {
+    setMsg('splitMsg', 'Split failed: ' + friendlyError(e), 'err');
+  }
+}
+
 const cut = { partId: null, partNumber: 1, duration: 0, start: 0, end: 0, videoUrl: '' };
 
 async function loadCutSeries() {
