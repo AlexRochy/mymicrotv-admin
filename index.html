@@ -318,6 +318,21 @@
         <textarea id="upDescription" placeholder="Short description shown under the player"></textarea>
       </div>
       <div class="row">
+        <div class="field" style="max-width:140px">
+          <label for="upBaseViews" title="Starting view count shown to public">Base views</label>
+          <input type="number" id="upBaseViews" min="0" value="1000">
+        </div>
+        <div class="field" style="max-width:140px">
+          <label for="upBaseLikes" title="Starting like count shown to public">Base likes</label>
+          <input type="number" id="upBaseLikes" min="0" value="100">
+        </div>
+        <div class="field" style="max-width:140px">
+          <label for="upBaseShares" title="Starting share count shown to public">Base shares</label>
+          <input type="number" id="upBaseShares" min="0" value="50">
+        </div>
+      </div>
+      <p class="hint">Base counts = starting numbers shown to public (real views/likes add on top).</p>
+      <div class="row">
         <div class="field">
           <label for="upCategory">Category</label>
           <input type="text" id="upCategory" placeholder="e.g. Horror, Comedy, Drama">
@@ -943,6 +958,9 @@ $('btnUpload').onclick = async () => {
       thumbnail_url: thumbUrl,
       published: $('upPublished').checked,
       views_count: 0,
+      base_views: parseInt($('upBaseViews').value, 10) || 0,
+      base_likes: parseInt($('upBaseLikes').value, 10) || 0,
+      base_shares: parseInt($('upBaseShares').value, 10) || 0,
     };
     const { data: existing, error: selErr } = await supa.from('parts')
       .select('id').eq('series_id', seriesId).eq('part_number', partNumber).maybeSingle();
@@ -1026,6 +1044,9 @@ async function autoSplit() {
     if (e1) throw e1;
 
     // create the rest as drafts
+    const baseV = parseInt($('upBaseViews').value, 10) || 0;
+    const baseL = parseInt($('upBaseLikes').value, 10) || 0;
+    const baseS = parseInt($('upBaseShares').value, 10) || 0;
     const rows = segs.slice(1).map((sg, i) => ({
       series_id: seriesId,
       part_number: partNumber + 1 + i,
@@ -1037,6 +1058,9 @@ async function autoSplit() {
       end_ms: sg[1] * 1000,
       published: false,
       views_count: 0,
+      base_views: baseV,
+      base_likes: baseL,
+      base_shares: baseS,
     }));
     if (rows.length) {
       const { error: e2 } = await supa.from('parts').insert(rows);
