@@ -1403,6 +1403,7 @@ function renderContent() {
               ${p.published ? '<span class="badge pub">Published</span>' : '<span class="badge">Draft</span>'}
               <small>${(p.views_count || 0).toLocaleString()} views · cut ${fmtTime((p.start_ms || 0) / 1000)}–${fmtTime((p.end_ms || 0) / 1000)}</small>
             </div>
+            <button class="btn small" data-act="publish-part">${p.published ? 'Unpublish' : 'Publish'}</button>
             <button class="btn ghost small" data-act="edit-part">Edit</button>
             <button class="btn danger small" data-act="del-part">Delete</button>
           </div>`).join('') || '<div class="empty">No parts in this series.</div>'}
@@ -1422,10 +1423,23 @@ $('contentList').addEventListener('click', async (e) => {
   try {
     if (act === 'edit-part') showPartEditor(partEl);
     else if (act === 'del-part') await deletePart(partEl);
+    else if (act === 'publish-part') await togglePublish(partEl);
     else if (act === 'edit-series') showSeriesEditor(seriesEl);
     else if (act === 'del-series') await deleteSeries(seriesEl);
   } catch (err) { setMsg('contentMsg', friendlyError(err), 'err'); }
 });
+
+/** One-click publish/unpublish toggle for a part. */
+async function togglePublish(partEl) {
+  const p = findPart(partEl.dataset.pid);
+  if (!p) return;
+  await requireAdmin();
+  const { error } = await supa.from('parts').update({ published: !p.published }).eq('id', p.id);
+  if (error) throw error;
+  p.published = !p.published;
+  renderContent();
+  toast(p.published ? 'Published' : 'Unpublished');
+}
 
 function findPart(pid) {
   for (const s of contentCache) { const p = s.parts.find((x) => x.id === pid); if (p) return p; }
