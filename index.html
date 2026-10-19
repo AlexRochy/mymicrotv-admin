@@ -331,7 +331,7 @@
           <input type="number" id="upBaseShares" min="0" value="50">
         </div>
       </div>
-      <p class="hint">Base counts = starting numbers shown to public (real views/likes add on top).</p>
+      <p class="hint">Base counts = starting numbers shown to public (real views/likes add on top). <button class="btn ghost small" id="btnRandomBase" type="button">🎲 Random</button></p>
       <div class="row">
         <div class="field">
           <label for="upCategory">Category</label>
@@ -887,6 +887,15 @@ function safeName(name) {
   return String(name || 'file').replace(/[^\w.\-]+/g, '_').slice(0, 80);
 }
 
+/** 🎲 Fill base counts with random natural-looking numbers. */
+$('btnRandomBase').onclick = () => {
+  const r = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  $('upBaseViews').value = r(5000, 50000);
+  $('upBaseLikes').value = r(200, 2000);
+  $('upBaseShares').value = r(50, 500);
+  toast('Random base counts filled');
+};
+
 $('btnUpload').onclick = async () => {
   if (upState.uploading) return;
   setMsg('upMsg', ''); $('upResult').innerHTML = '';
@@ -949,8 +958,7 @@ $('btnUpload').onclick = async () => {
     }
 
     // 4) insert or update the part (same series + part_number = update)
-    const partRow = {
-      series_id: seriesId,
+    const partRow = {      series_id: seriesId,
       part_number: partNumber,
       title,
       description: $('upDescription').value.trim() || null,
