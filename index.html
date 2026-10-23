@@ -1856,7 +1856,8 @@ function showSeriesEditor(seriesEl) {
     <div class="field"><label>Poster URL</label><input type="text" data-f="poster_url" value="${esc(s.poster_url || '')}"></div>
     <div class="field"><label>🖼️ Change poster / thumbnail — ছবি আপলোড করো</label>
       <input type="file" data-poster-file accept="image/*">
-      <small style="color:#666">আপলোডের সময় thumbnail দিতে ভুলে গেলে এখান থেকে ছবি বেছে Save দাও — poster বদলে যাবে, আর যেসব part-এর thumbnail ফাঁকা আছে সেগুলোতেও এই ছবি বসে যাবে।</small>
+      <small style="color:#666">ছবি বেছে Save দিলে poster বদলে যাবে। নিচের টিকটা থাকলে <b>সব part-এর thumbnail-ও</b> এই ছবি হয়ে যাবে (ভিতরের episode list-এও)।</small>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:6px"><input type="checkbox" data-apply-parts checked style="width:20px;height:20px"><span>সব part-এর thumbnail-ও বদলাও</span></label>
       ${s.poster_url ? `<img src="${esc(s.poster_url)}" alt="" style="width:90px;border-radius:8px;display:block;margin-top:6px">` : ''}
     </div>
     <div class="switchrow"><label class="switch"><input type="checkbox" data-f="is_ai_generated" ${s.is_ai_generated ? 'checked' : ''}><span class="slider"></span></label><span>Made with AI</span></div>
@@ -1880,8 +1881,13 @@ function showSeriesEditor(seriesEl) {
         const key = `posters/${Date.now()}-${safeName(posterFile.name)}`;
         await uploadToR2(posterFile, key, posterFile.type || 'image/jpeg', null);
         posterUrl = r2Url(key);
-        await supa.from('parts').update({ thumbnail_url: posterUrl }).eq('series_id', s.id).is('thumbnail_url', null);
-        await supa.from('parts').update({ thumbnail_url: posterUrl }).eq('series_id', s.id).eq('thumbnail_url', '');
+        if (div.querySelector('[data-apply-parts]').checked) {
+          // His rule (Oct 23): a thumbnail change in Edit applies to
+          // the poster AND every part of the series.
+          const { error: pErr } = await supa.from('parts')
+            .update({ thumbnail_url: posterUrl }).eq('series_id', s.id);
+          if (pErr) throw pErr;
+        }
       }
       const { error } = await supa.from('series').update({
         title: div.querySelector('[data-f=title]').value.trim(),
