@@ -769,15 +769,21 @@ function unlock() {
   loadConfigIntoForm();
   testConnections(true); // quiet auto-check on unlock
   setTimeout(() => { try { loadPresence(); } catch (e) {} }, 800);
-  // Live Users should feel live: refresh the header numbers every 30s.
+  // Live Users should feel live: refresh the header numbers every 10s
+  // (was 30s — felt laggy next to the IPTV panel). Also refresh the
+  // moment the panel tab becomes visible/focused again.
   if (!window._presenceTimer) {
     window._presenceTimer = setInterval(() => {
       try { loadPresence(); } catch (e) {}
-      // Analytics open থাকলে ওটাও 30s পরপর live refresh
+      // Analytics open থাকলে ওটাও সাথে live refresh
       try {
         if (document.querySelector('#tab-analytics.active') && $('anSeries').dataset.loaded) runAnalytics(true);
       } catch (e) {}
-    }, 30000);
+    }, 10000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { try { loadPresence(); } catch (e) {} }
+    });
+    window.addEventListener('focus', () => { try { loadPresence(); } catch (e) {} });
   }
 }
 $('btnLock').onclick = () => {
