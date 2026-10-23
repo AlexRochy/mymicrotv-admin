@@ -1113,6 +1113,60 @@ $('btnRecaptureThumb').onclick = () => {
   if (!upState.file) { setMsg('upMsg', 'Pick a video file first.', 'err'); return; }
   captureThumbnail(URL.createObjectURL(upState.file));
 };
+
+/** Capture ONE frame at `t` seconds from a video src as a JPEG blob
+    (promise-based; reuses the hidden #thumbVideo/#thumbCanvas).
+    For https srcs pass useCors=true (R2 sends CORS *, so the canvas
+    stays clean). Resolves null on any failure. Used for per-part
+    thumbnails — his Moj-style rule (Oct 24): every part shows a frame
+    from its OWN segment, no manual thumbnails anywhere. */
+function captureFrameAt(src, t, useCors) {
+  return new Promise((resolve) => {
+    const v = $('thumbVideo');
+    let settled = false;
+    const finish = (blob) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(blob);
+    };
+    const timer = setTimeout(() => finish(null), 60000);
+    v.onloadedmetadata = () => {
+      const dur = v.duration || 0;
+      const target = Math.min(Math.max(t, 0.1), Math.max(dur - 0.3, 0.1));
+      try { v.currentTime = target; } catch (e) { finish(null); }
+    };
+    v.onseeked = () => {
+      try {
+        const c = $('thumbCanvas');
+        const w = Math.min(v.videoWidth || 1280, 1280);
+        const h = Math.round((v.videoHeight / (v.videoWidth || 16)) * w) || 720;
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(v, 0, 0, w, h);
+        c.toBlob((blob) => finish(blob), 'image/jpeg', 0.82);
+      } catch (e) { finish(null); }
+    };
+    v.onerror = () => finish(null);
+    if (useCors) v.crossOrigin = 'anonymous'; else v.removeAttribute('crossorigin');
+    v.src = src;
+  });
+}
+
+/** Capture + upload + save a per-part thumbnail from a part's own
+    segment [start_ms..end_ms]. Returns the new URL or null. */
+async function setPartThumbFromVideo(part, src, useCors, stamp) {
+  const st = (part.start_ms || 0) / 1000, en = (part.end_ms || 0) / 1000;
+  const segLen = Math.max(en - st, 1);
+  const t = st + Math.min(5, Math.max(1, segLen * 0.15));
+  const blob = await captureFrameAt(src, t, useCors);
+  if (!blob) return null;
+  const key = `thumbs/${stamp}-p${part.part_number}.jpg`;
+  await uploadToR2(blob, key, 'image/jpeg', null);
+  const url = r2Url(key);
+  const { error } = await supa.from('parts').update({ thumbnail_url: url }).eq('id', part.id);
+  if (error) throw error;
+  return url;
+}
 $('thumbReplace').addEventListener('change', () => {
   const f = $('thumbReplace').files[0];
   if (!f || !f.type.startsWith('image/')) return;
@@ -1335,6 +1389,28 @@ async function autoSplit() {
     if (rows.length) {
       const { error: e2 } = await supa.from('parts').insert(rows);
       if (e2) throw e2;
+    }
+    // Per-part thumbnails from each part's OWN segment (Moj-style,
+    // Oct 24) — the shared 10% capture is replaced part by part.
+    // Local file only; if it's gone, Content tab's 🎞️ button covers it.
+    if (upState.file) {
+      try {
+        const { data: allParts } = await supa.from('parts')
+          .select('id,part_number,start_ms,end_ms')
+          .eq('series_id', seriesId)
+          .gte('part_number', partNumber)
+          .lte('part_number', partNumber + segs.length - 1)
+          .order('part_number');
+        const objUrl = URL.createObjectURL(upState.file);
+        const stamp2 = Date.now();
+        let n = 0;
+        for (const p of (allParts || [])) {
+          setMsg('splitMsg', `🎞️ Part thumbnails বানাচ্ছি… ${n}/${(allParts || []).length}`, '');
+          await setPartThumbFromVideo(p, objUrl, false, stamp2).catch(() => null);
+          n++;
+        }
+        URL.revokeObjectURL(objUrl);
+      } catch (e) { console.warn('per-part thumbs failed', e); }
     }
     setMsg('splitMsg', `✅ ${segs.length} draft parts created (Part ${partNumber}–${partNumber + segs.length - 1}). Publish them one by one from the Content tab.`, 'ok');
     toast('Auto-split done');
@@ -1736,6 +1812,7 @@ function renderContent() {
           <span>${esc(s.category || 'Uncategorized')} · ${s.parts.length} part(s)${s.is_ai_generated ? '<span class="badge ai">AI</span>' : ''}</span>
         </div>
         <button class="btn small" data-act="publish-all" title="Publish all drafts in this series">📢 Publish all</button>
+        <button class="btn ghost small" data-act="auto-thumbs" title="প্রতিটা part-এর নিজের ভিডিও থেকে thumbnail বসাও">🎞️ Auto thumbs</button>
         <button class="btn ghost small" data-act="edit-series">Edit</button>
         <button class="btn danger small" data-act="del-series">Delete</button>
       </div>
@@ -1770,6 +1847,7 @@ $('contentList').addEventListener('click', async (e) => {
     else if (act === 'del-part') await deletePart(partEl);
     else if (act === 'publish-part') await togglePublish(partEl);
     else if (act === 'publish-all') await publishAll(seriesEl);
+    else if (act === 'auto-thumbs') await autoPartThumbs(seriesEl);
     else if (act === 'edit-series') showSeriesEditor(seriesEl);
     else if (act === 'del-series') await deleteSeries(seriesEl);
   } catch (err) { setMsg('contentMsg', friendlyError(err), 'err'); }
@@ -1792,6 +1870,33 @@ async function publishAll(seriesEl) {
   const el = document.querySelector(`.series[data-sid="${s.id}"]`);
   if (el) el.classList.add('open');
   toast(`✅ ${drafts.length} parts published`);
+}
+
+/** 🎞️ Per-part thumbnails for an EXISTING series (Moj-style, Oct 24):
+    every part gets a frame from its own segment of its video — he no
+    longer uses manual thumbnails. Runs sequentially in the browser;
+    a big series takes a few minutes on desktop. */
+async function autoPartThumbs(seriesEl) {
+  const s = contentCache.find((x) => x.id === seriesEl.dataset.sid);
+  if (!s) return;
+  if (!s.parts.length) { toast('No parts in this series'); return; }
+  if (!confirm(`"${s.title}" — ${s.parts.length}টা part-এর প্রতিটায় নিজের ভিডিও থেকে thumbnail বসাবো। একটু সময় লাগতে পারে। শুরু করি?`)) return;
+  await requireAdmin();
+  requireR2();
+  const parts = [...s.parts].sort((a, b) => a.part_number - b.part_number);
+  const stamp = Date.now();
+  let ok = 0, fail = 0;
+  for (const p of parts) {
+    setMsg('contentMsg', `🎞️ ${s.title}: Part ${p.part_number}-এর thumbnail (${ok + fail + 1}/${parts.length})…`, '');
+    try {
+      const url = await setPartThumbFromVideo(p, p.video_url, true, stamp);
+      if (url) { p.thumbnail_url = url; ok++; } else { fail++; }
+    } catch (e) { fail++; }
+  }
+  renderContent();
+  const el = document.querySelector(`.series[data-sid="${s.id}"]`);
+  if (el) el.classList.add('open');
+  setMsg('contentMsg', `🎞️ ${s.title}: ${ok}টা part-এ নিজের ভিডিওর thumbnail বসেছে${fail ? ` · ${fail}টা হয়নি (আবার চেষ্টা করো)` : ''}।`, ok ? 'ok' : 'err');
 }
 
 /** One-click publish/unpublish toggle for a part — updates in place,
