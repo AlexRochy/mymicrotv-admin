@@ -433,7 +433,7 @@
       <p class="hint">Built from <code>view_events</code> (last 30 days) and the <code>views_count</code> column on parts. Empty states are normal for a new app.</p>
       <div class="row">
         <div class="field" style="max-width:320px">
-          <label for="anSeries">Series (All = সম্পূর্ণ database)</label>
+          <label for="anSeries">Series</label>
           <select id="anSeries"><option value="">— select series —</option></select>
         </div>
         <div><button class="btn" id="btnRefreshAnalytics">⟳ Refresh</button></div>
@@ -1618,7 +1618,7 @@ async function loadAnalyticsSeries() {
   sel.innerHTML = '<option value="">— select series —</option>';
   const allOpt = document.createElement('option');
   allOpt.value = '__all__';
-  allOpt.textContent = '🌐 All — সম্পূর্ণ database';
+  allOpt.textContent = '🌐 All';
   sel.appendChild(allOpt);
   try {
     const rows = await fetchSeries();
