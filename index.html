@@ -441,15 +441,16 @@
       <div class="msg" id="anMsg"></div>
     </div>
     <div class="stats">
-      <div class="stat"><div class="v" id="statInstalls">—</div><div class="l">⬇️ Total Downloads</div></div>
       <div class="stat"><div class="v" id="statLive">—</div><div class="l">🟢 Live Users</div></div>
-      <div class="stat"><div class="v" id="statViews">—</div><div class="l">Total views (30 days)</div></div>
-      <div class="stat"><div class="v" id="statSeries">—</div><div class="l">Total series</div></div>
-      <div class="stat"><div class="v" id="statParts">—</div><div class="l">Total parts</div></div>
-      <div class="stat"><div class="v" id="statPublished">—</div><div class="l">Published parts</div></div>
+      <div class="stat"><div class="v" id="statWatching">—</div><div class="l">▶️ Watching Now</div></div>
+      <div class="stat"><div class="v" id="statToday">—</div><div class="l">👁️ Views Today</div></div>
+      <div class="stat"><div class="v" id="statViews">—</div><div class="l">📅 Views (30 days)</div></div>
+      <div class="stat"><div class="v" id="statWatch">—</div><div class="l">⏱️ Watch Time (30 days)</div></div>
+      <div class="stat"><div class="v" id="statSeriesParts">—</div><div class="l">📺 Series / Parts</div></div>
     </div>
     <!-- All mode shows views by date inside the "Views per day" chart
          itself (his reference layout, Oct 24) — no long date list. -->
+    <div class="chartbox"><h3>🔴 Live Activity — শেষ ৬০ মিনিটের views (প্রতি ৫ মিনিটে)</h3><canvas id="chartLive"></canvas></div>
     <div class="chartbox"><h3>Views per day (last 30 days)</h3><canvas id="chartDaily"></canvas></div>
     <div class="chartbox"><h3>Views per series (last 30 days)</h3><canvas id="chartSeries"></canvas></div>
     <div class="chartbox"><h3 id="funnelTitle">Drop-off funnel — views per part</h3><canvas id="chartFunnel"></canvas></div>
@@ -770,7 +771,13 @@ function unlock() {
   setTimeout(() => { try { loadPresence(); } catch (e) {} }, 800);
   // Live Users should feel live: refresh the header numbers every 30s.
   if (!window._presenceTimer) {
-    window._presenceTimer = setInterval(() => { try { loadPresence(); } catch (e) {} }, 30000);
+    window._presenceTimer = setInterval(() => {
+      try { loadPresence(); } catch (e) {}
+      // Analytics open থাকলে ওটাও 30s পরপর live refresh
+      try {
+        if (document.querySelector('#tab-analytics.active') && $('anSeries').dataset.loaded) runAnalytics(true);
+      } catch (e) {}
+    }, 30000);
   }
 }
 $('btnLock').onclick = () => {
@@ -1653,7 +1660,7 @@ async function fetchViewEvents(since) {
   const PAGE = 1000;
   for (let i = 0; i < 50; i++) {
     const { data, error } = await supa.from('view_events')
-      .select('part_id,created_at').gte('created_at', since.toISOString())
+      .select('part_id,created_at,watched_ms').gte('created_at', since.toISOString())
       .order('created_at', { ascending: true }).range(i * PAGE, (i + 1) * PAGE - 1);
     if (error) throw error;
     rows.push(...(data || []));
@@ -1662,7 +1669,7 @@ async function fetchViewEvents(since) {
   return rows;
 }
 
-async function runAnalytics() {
+async function runAnalytics(quiet) {
   setMsg('anMsg', '');
   if (typeof Chart === 'undefined') {
     setMsg('anMsg', 'Chart.js failed to load (CDN blocked?). Check your connection and refresh.', 'err');
@@ -1670,7 +1677,7 @@ async function runAnalytics() {
   }
   try {
     if (!supa) throw new Error('Supabase is not configured (Config tab).');
-    setMsg('anMsg', 'Loading…');
+    if (!quiet) setMsg('anMsg', 'Loading…');
     const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
 
     const [seriesRes, partsRes] = await Promise.all([
@@ -1688,11 +1695,22 @@ async function runAnalytics() {
     const seriesTitle = Object.fromEntries(series.map((s) => [s.id, s.title]));
     const partSeries = Object.fromEntries(parts.map((p) => [p.id, p.series_id]));
 
-    // stat cards
+    // stat cards (full package, Oct 24 — Downloads lives in the header,
+    // NOT here; this page is the live analysis base)
+    const nowMs = Date.now();
     $('statViews').textContent = events.length.toLocaleString();
-    $('statSeries').textContent = series.length.toLocaleString();
-    $('statParts').textContent = parts.length.toLocaleString();
-    $('statPublished').textContent = parts.filter((p) => p.published).length.toLocaleString();
+    $('statWatching').textContent = events
+      .filter((ev) => nowMs - new Date(ev.created_at).getTime() < 5 * 60 * 1000)
+      .length.toLocaleString();
+    const todayKey = new Date().toISOString().slice(0, 10);
+    $('statToday').textContent = events
+      .filter((ev) => (ev.created_at || '').slice(0, 10) === todayKey)
+      .length.toLocaleString();
+    const watchMs = events.reduce((a, ev) => a + (ev.watched_ms || 0), 0);
+    $('statWatch').textContent = watchMs >= 3600000
+      ? (watchMs / 3600000).toFixed(1) + ' ঘণ্টা'
+      : Math.round(watchMs / 60000) + ' মিনিট';
+    $('statSeriesParts').textContent = series.length + ' / ' + parts.length;
 
     destroyCharts();
     const gridColor = '#ffffff14', tickColor = '#9aa4b2';
@@ -1709,6 +1727,25 @@ async function runAnalytics() {
       setMsg('anMsg', 'No data yet — upload a series and the charts will fill in.', '');
       return;
     }
+
+    // (live) activity in the last 60 minutes, 5-minute buckets
+    const liveBuckets = new Array(12).fill(0);
+    const liveLabels = [];
+    for (let i = 11; i >= 0; i--) {
+      liveLabels.push(new Date(nowMs - i * 5 * 60 * 1000)
+        .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }));
+    }
+    events.forEach((ev) => {
+      const age = nowMs - new Date(ev.created_at).getTime();
+      if (age >= 0 && age < 60 * 60 * 1000) {
+        liveBuckets[11 - Math.floor(age / (5 * 60 * 1000))]++;
+      }
+    });
+    charts.live = new Chart($('chartLive'), {
+      type: 'bar',
+      data: { labels: liveLabels, datasets: [{ data: liveBuckets, backgroundColor: '#ff5c7a' }] },
+      options: baseOpts,
+    });
 
     // (a) views per day, last 30 days
     const days = [], dayCount = {};
