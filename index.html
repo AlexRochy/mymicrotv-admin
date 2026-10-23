@@ -138,18 +138,12 @@
   .kv{font-size:13px;color:var(--muted)}
   .kv b{color:var(--text)}
 </style>
-<!-- Chart.js (UMD global) -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<!-- ESM imports for Supabase + AWS SDK v3 (S3-compatible R2) -->
-<script type="importmap">
-{
-  "imports": {
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2",
-    "@aws-sdk/client-s3": "https://esm.sh/@aws-sdk/client-s3@3?bundle",
-    "@aws-sdk/s3-request-presigner": "https://esm.sh/@aws-sdk/s3-request-presigner@3?bundle"
-  }
-}
-</script>
+<!-- Self-hosted libraries (Oct 23 fix): the panel used to load its code
+     from the esm.sh CDN — when that CDN timed out, ALL panel JavaScript
+     died and login became impossible. Vendored copies in ./vendor/ remove
+     the outside dependency. R2 uses a small built-in SigV4 signer. -->
+<script src="vendor/chart.umd.min.js"></script>
+<script src="vendor/supabase.js"></script>
 </head>
 <body>
 
@@ -582,6 +576,38 @@
         <button class="btn" id="btnSaveAds">💾 Save Ad Codes</button>
       </div>
     </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>🚀 App Update (online)</h2>
+      <p class="hint">IPTV-style update: upload the new APK → set the version → Publish. Every phone with v1.0.33+ gets the update popup on next open, downloads and installs it. Repeat for every release.</p>
+      <div class="msg" id="updMsg"></div>
+      <label>New version <small style="color:#666">(must be higher than the current app version, e.g. 1.0.34)</small>
+        <input type="text" id="updVersion" placeholder="1.0.34">
+      </label>
+      <label>APK file <small style="color:#666">(uploads to R2 as app/MyMicroTV-latest.apk — the link stays the same every time)</small>
+        <input type="file" id="updApkFile" accept=".apk,application/vnd.android.package-archive">
+      </label>
+      <div id="updProgressWrap" style="display:none;margin:8px 0">
+        <div style="background:#eee;border-radius:6px;height:14px;overflow:hidden">
+          <div id="updProgressBar" style="background:#7C3AED;height:100%;width:0%"></div>
+        </div>
+        <small id="updProgressText" style="color:#666">Uploading…</small>
+      </div>
+      <label>APK URL <small style="color:#666">(auto-filled after upload — you can also paste any APK link)</small>
+        <input type="text" id="updUrl" placeholder="https://…r2.dev/app/MyMicroTV-latest.apk">
+      </label>
+      <label>Message for users <small style="color:#666">(optional — shown in the update popup)</small>
+        <input type="text" id="updMessage" placeholder="নতুন ফিচার ও ফিক্স এসেছে!">
+      </label>
+      <label style="display:flex;align-items:center;justify-content:space-between;padding:8px 0">
+        <span><b>Force update</b><br><small style="color:#666">ON = no "Later" button — users must update to keep using the app</small></span>
+        <input type="checkbox" id="updForce" style="width:24px;height:24px">
+      </label>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="btnPublishUpdate">🚀 Publish Update</button>
+      </div>
+      <p class="hint" id="updCurrent" style="margin-top:8px"></p>
+    </div>
   </section>
 </main>
 
@@ -604,9 +630,7 @@
      G. Analytics tab
      H. Content tab
    ================================================================ */
-import { createClient } from '@supabase/supabase-js';
-import { S3Client, ListObjectsV2Command, DeleteObjectsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+const { createClient } = window.supabase; // vendored UMD build (vendor/supabase.js)
 
 /* ---------------- A. tiny helpers ---------------- */
 const $ = (id) => document.getElementById(id);
@@ -759,15 +783,132 @@ function buildClients() {
   }
   if (CFG.r2AccountId && CFG.r2AccessKey && CFG.r2SecretKey) {
     try {
-      s3 = new S3Client({
-        region: 'auto',
-        endpoint: `https://${CFG.r2AccountId}.r2.cloudflarestorage.com`,
-        credentials: { accessKeyId: CFG.r2AccessKey, secretAccessKey: CFG.r2SecretKey },
-      });
+      s3 = makeR2Client();
     } catch (e) { console.warn('r2 init failed', e); }
   }
   refreshAuthStatus();
 }
+
+/* --------- R2 via hand-rolled SigV4 (replaces the AWS SDK, Oct 23) ---------
+   The panel needs only three S3 operations: presigned PUT (uploads),
+   ListObjectsV2 (storage meter + connection test) and object deletes.
+   Implementing them directly keeps the panel free of CDN-loaded SDKs.
+   The tiny command classes below keep the existing call sites unchanged. */
+class ListObjectsV2Command { constructor(input) { this.input = input; } }
+class DeleteObjectsCommand { constructor(input) { this.input = input; } }
+class PutObjectCommand { constructor(input) { this.input = input; } }
+
+const _enc = new TextEncoder();
+async function _sha256hexBytes(bytes) {
+  const buf = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+async function _hmac(keyBytes, str) {
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, _enc.encode(str)));
+}
+const _hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+async function _signingKey(secret, dateStamp) {
+  let k = await _hmac(_enc.encode('AWS4' + secret), dateStamp);
+  k = await _hmac(k, 'auto');
+  k = await _hmac(k, 's3');
+  k = await _hmac(k, 'aws4_request');
+  return k;
+}
+function _amzDates() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const dateStamp = `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}`;
+  return { dateStamp, amzDate: `${dateStamp}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z` };
+}
+const _uri = (s) => encodeURIComponent(s).replace(/[!*'()]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+const _keyPath = (bucket, key) => '/' + _uri(bucket) + (key ? '/' + key.split('/').map(_uri).join('/') : '');
+
+function makeR2Client() {
+  const host = `${CFG.r2AccountId}.r2.cloudflarestorage.com`;
+  const scope = (dateStamp) => `${dateStamp}/auto/s3/aws4_request`;
+
+  async function presignPut(bucket, key, expiresIn) {
+    const { dateStamp, amzDate } = _amzDates();
+    const q = {
+      'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+      'X-Amz-Credential': `${CFG.r2AccessKey}/${scope(dateStamp)}`,
+      'X-Amz-Date': amzDate,
+      'X-Amz-Expires': String(expiresIn || 3600),
+      'X-Amz-SignedHeaders': 'host',
+    };
+    const qs = Object.keys(q).sort().map((k) => `${_uri(k)}=${_uri(q[k])}`).join('&');
+    const canonical = ['PUT', _keyPath(bucket, key), qs, `host:${host}`, '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+    const sts = ['AWS4-HMAC-SHA256', amzDate, scope(dateStamp), await sha256hex(canonical)].join('\n');
+    const sig = _hex(await _hmac(await _signingKey(CFG.r2SecretKey, dateStamp), sts));
+    return `https://${host}${_keyPath(bucket, key)}?${qs}&X-Amz-Signature=${sig}`;
+  }
+
+  async function signedFetch(method, path, query, bodyText) {
+    const { dateStamp, amzDate } = _amzDates();
+    const payloadHash = bodyText == null ? 'UNSIGNED-PAYLOAD' : await _sha256hexBytes(_enc.encode(bodyText));
+    const qs = Object.keys(query || {}).sort().map((k) => `${_uri(k)}=${_uri(query[k])}`).join('&');
+    const headers = { host, 'x-amz-content-sha256': payloadHash, 'x-amz-date': amzDate };
+    const names = Object.keys(headers).sort();
+    const canonicalHeaders = names.map((k) => `${k}:${headers[k]}\n`).join('');
+    const canonical = [method, path, qs, canonicalHeaders, names.join(';'), payloadHash].join('\n');
+    const sts = ['AWS4-HMAC-SHA256', amzDate, scope(dateStamp), await sha256hex(canonical)].join('\n');
+    const sig = _hex(await _hmac(await _signingKey(CFG.r2SecretKey, dateStamp), sts));
+    const res = await fetch(`https://${host}${path}${qs ? '?' + qs : ''}`, {
+      method,
+      headers: {
+        Authorization: `AWS4-HMAC-SHA256 Credential=${CFG.r2AccessKey}/${scope(dateStamp)}, SignedHeaders=${names.join(';')}, Signature=${sig}`,
+        'x-amz-content-sha256': payloadHash,
+        'x-amz-date': amzDate,
+        ...(bodyText != null ? { 'Content-Type': 'application/xml' } : {}),
+      },
+      body: bodyText ?? undefined,
+    });
+    if (!res.ok) throw new Error('R2 ' + method + ' failed: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
+    return res;
+  }
+
+  return {
+    async send(cmd) {
+      if (cmd instanceof ListObjectsV2Command) {
+        const { Bucket, Prefix, MaxKeys, ContinuationToken } = cmd.input;
+        const query = { 'list-type': '2' };
+        if (Prefix) query.prefix = Prefix;
+        if (MaxKeys) query['max-keys'] = String(MaxKeys);
+        if (ContinuationToken) query['continuation-token'] = ContinuationToken;
+        const res = await signedFetch('GET', _keyPath(Bucket, ''), query, null);
+        const xml = new DOMParser().parseFromString(await res.text(), 'text/xml');
+        const contents = [...xml.getElementsByTagName('Contents')].map((c) => ({
+          Key: c.getElementsByTagName('Key')[0]?.textContent || '',
+          Size: Number(c.getElementsByTagName('Size')[0]?.textContent || 0),
+        }));
+        const truncated = xml.getElementsByTagName('IsTruncated')[0]?.textContent === 'true';
+        return {
+          Contents: contents,
+          IsTruncated: truncated,
+          NextContinuationToken: truncated ? (xml.getElementsByTagName('NextContinuationToken')[0]?.textContent || undefined) : undefined,
+        };
+      }
+      if (cmd instanceof DeleteObjectsCommand) {
+        const { Bucket, Delete } = cmd.input;
+        for (const o of (Delete?.Objects || [])) {
+          await signedFetch('DELETE', _keyPath(Bucket, o.Key), {}, null);
+        }
+        return {};
+      }
+      throw new Error('Unsupported R2 command');
+    },
+    _presignPut: presignPut,
+  };
+}
+
+async function getSignedUrl(client, cmd, opts) {
+  if (cmd instanceof PutObjectCommand) {
+    return client._presignPut(cmd.input.Bucket, cmd.input.Key, (opts && opts.expiresIn) || 3600);
+  }
+  throw new Error('getSignedUrl: unsupported command');
+}
+
 function setDot(id, state) { // state: ok | bad | wait
   const el = $(id);
   el.className = 'dot ' + state;
@@ -1822,6 +1963,14 @@ async function loadAds() {
     }
     const pri = (map['ads_priority'] || 'admob,meta,inmobi').split(',');
     if (pri[0]) $('adPri1').value = pri[0];
+    // App Update section (same settings table).
+    $('updVersion').value = map['app_latest_version'] || '';
+    $('updUrl').value = map['app_apk_url'] || '';
+    $('updMessage').value = map['app_update_message'] || '';
+    $('updForce').checked = map['app_force_update'] === 'true';
+    $('updCurrent').textContent = map['app_latest_version']
+      ? '📱 এখন live: v' + map['app_latest_version'] + ' — এর চেয়ে কম version-এর সব ফোনে update popup যাবে।'
+      : '📱 এখনো কোনো update publish হয়নি।';
     if (pri[1]) $('adPri2').value = pri[1];
     if (pri[2]) $('adPri3').value = pri[2];
   } catch (err) { setMsg('adsMsg', friendlyError(err), 'err'); }
@@ -1851,6 +2000,44 @@ $('btnSaveAds').onclick = async () => {
     toast('Ad codes saved');
   } catch (err) { setMsg('adsMsg', friendlyError(err), 'err'); }
 };
+/* ---------------- App Update (1.0.33): R2 APK upload + publish ---------------- */
+$('btnPublishUpdate').onclick = async () => {
+  try {
+    await requireAdmin();
+    const version = $('updVersion').value.trim();
+    if (!version) { setMsg('updMsg', '❌ Version লিখো (যেমন 1.0.34)।', 'err'); return; }
+    // 1) Upload the APK first if a file was picked (stable key = stable URL).
+    const file = $('updApkFile').files[0];
+    if (file) {
+      if (!s3) { setMsg('updMsg', '❌ R2 config নাই — Config tab-এ R2 keys বসাও।', 'err'); return; }
+      const key = 'app/MyMicroTV-latest.apk';
+      $('updProgressWrap').style.display = 'block';
+      await uploadToR2(file, key, 'application/vnd.android.package-archive', (f) => {
+        $('updProgressBar').style.width = Math.round(f * 100) + '%';
+        $('updProgressText').textContent = 'Uploading APK… ' + Math.round(f * 100) + '%';
+      });
+      $('updProgressText').textContent = '✅ Upload complete';
+      $('updUrl').value = (CFG.r2PublicBase || '').replace(/\/$/, '') + '/' + key;
+    }
+    const url = $('updUrl').value.trim();
+    if (!url) { setMsg('updMsg', '❌ APK URL নাই — আগে APK file select করে Publish চাপো, অথবা লিংক paste করো।', 'err'); return; }
+    // 2) Save the four update keys — the app picks them up on next open.
+    const rows = [
+      { key: 'app_latest_version', value: version },
+      { key: 'app_apk_url', value: url },
+      { key: 'app_force_update', value: $('updForce').checked ? 'true' : 'false' },
+      { key: 'app_update_message', value: $('updMessage').value.trim() },
+    ];
+    for (const r of rows) {
+      const { error } = await supa.from('app_settings').upsert(r, { onConflict: 'key' });
+      if (error) throw error;
+    }
+    setMsg('updMsg', '🚀 Update published! v' + version + ' — সব ফোনে পরের open-এ popup যাবে।', 'ok');
+    $('updCurrent').textContent = '📱 এখন live: v' + version + ' — এর চেয়ে কম version-এর সব ফোনে update popup যাবে।';
+    toast('Update published: v' + version);
+  } catch (err) { setMsg('updMsg', friendlyError(err), 'err'); }
+};
+
 buildClients();
 initGate();
 </script>
