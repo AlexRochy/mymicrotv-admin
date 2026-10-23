@@ -151,7 +151,7 @@
   <h1>📺 My Micro TV <span class="sub">Admin Panel</span></h1>
   <div class="status">
     <span title="কত ফোনে app টা আছে">⬇️ Total Downloads: <b id="hdrInstalls">—</b></span>
-    <span title="শেষ ৬ মিনিটে app খুলেছে">🟢 Live Users: <b id="hdrLive">—</b></span>
+    <span title="শেষ ৬ মিনিটে app খুলেছে" style="margin-right:14px">🟢 Live Users: <b id="hdrLive">—</b></span>
     <span><span class="dot wait" id="statusSupabase"></span>Supabase</span>
     <span><span class="dot wait" id="statusR2"></span>R2</span>
     <button class="btn" id="btnLock" title="Lock the panel (ask password next time)" style="padding:6px 10px;font-size:13px">🔒 Lock</button>
@@ -768,6 +768,10 @@ function unlock() {
   loadConfigIntoForm();
   testConnections(true); // quiet auto-check on unlock
   setTimeout(() => { try { loadPresence(); } catch (e) {} }, 800);
+  // Live Users should feel live: refresh the header numbers every 30s.
+  if (!window._presenceTimer) {
+    window._presenceTimer = setInterval(() => { try { loadPresence(); } catch (e) {} }, 30000);
+  }
 }
 $('btnLock').onclick = () => {
   localStorage.removeItem(LS_REMEMBER);
