@@ -187,6 +187,11 @@
 
   <!-- ===== TAB: CONFIG ===== -->
   <section class="tab active" id="tab-config">
+    <div class="stats" style="margin-bottom:16px">
+      <div class="stat"><div class="v" id="cfgInstalls">—</div><div class="l">⬇️ Total Downloads</div></div>
+      <div class="stat"><div class="v" id="cfgLive">—</div><div class="l">🟢 Live Users (এখন)</div></div>
+    </div>
+    <p class="hint" style="margin:-6px 0 14px">App থেকে আসা হিসাব: কতটা ফোনে app টা আছে (Total Downloads) আর শেষ ৬ মিনিটে কে কে app খুলেছে (Live Users) — IPTV panel-এর মতোই।</p>
     <div class="card">
       <h2>Panel Password</h2>
       <p class="hint">This is a LOCAL gate only (stored as a SHA-256 hash in this browser's localStorage). It does not protect Supabase or R2.</p>
@@ -765,6 +770,7 @@ function unlock() {
   $('app').style.display = 'block';
   loadConfigIntoForm();
   testConnections(true); // quiet auto-check on unlock
+  setTimeout(() => { try { loadPresence(); } catch (e) {} }, 800);
 }
 $('btnLock').onclick = () => {
   localStorage.removeItem(LS_REMEMBER);
@@ -1022,6 +1028,7 @@ document.querySelectorAll('nav.tabs button').forEach((btn) => {
     if (btn.dataset.tab === 'content' && !$('contentList').dataset.loaded) loadContent();
     if (btn.dataset.tab === 'settings') loadSettings();
     if (btn.dataset.tab === 'ads') loadAds();
+    if (btn.dataset.tab === 'config') loadPresence();
   };
 });
 
@@ -1615,22 +1622,26 @@ async function loadAnalyticsSeries() {
 $('anSeries').addEventListener('change', runAnalytics);
 $('btnRefreshAnalytics').onclick = runAnalytics;
 
-/** Presence stats (1.0.36): total installs + live users from `devices`.
-    Live = pinged within the last 6 minutes (same rule as his IPTV panel). */
+/** Presence stats (1.0.36): total downloads + live users from
+    `devices`. Shown on the Config tab (next to Supabase/R2, his ask)
+    AND in Analytics. Live = pinged within the last 6 minutes (same
+    rule as his IPTV panel). */
 async function loadPresence() {
+  const setPair = (a, b) => {
+    ['statInstalls', 'cfgInstalls'].forEach((id) => { const el = $(id); if (el) el.textContent = a; });
+    ['statLive', 'cfgLive'].forEach((id) => { const el = $(id); if (el) el.textContent = b; });
+  };
   try {
     if (!supa) return;
     const total = await supa.from('devices').select('device_id', { count: 'exact', head: true });
     if (total.error) throw total.error;
-    $('statInstalls').textContent = total.count ?? 0;
     const since = new Date(Date.now() - 6 * 60 * 1000).toISOString();
     const live = await supa.from('devices').select('device_id', { count: 'exact', head: true }).gte('last_seen', since);
     if (live.error) throw live.error;
-    $('statLive').textContent = live.count ?? 0;
+    setPair(String(total.count ?? 0), String(live.count ?? 0));
   } catch (e) {
     // devices table may not exist yet (SQL not run) — leave dashes.
-    $('statInstalls').textContent = '—';
-    $('statLive').textContent = '—';
+    setPair('—', '—');
   }
 }
 $('btnRefreshAnalytics').addEventListener('click', loadPresence);
