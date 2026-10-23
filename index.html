@@ -448,10 +448,8 @@
       <div class="stat"><div class="v" id="statParts">—</div><div class="l">Total parts</div></div>
       <div class="stat"><div class="v" id="statPublished">—</div><div class="l">Published parts</div></div>
     </div>
-    <div class="chartbox" id="allDbBox" style="display:none">
-      <h3>📅 তারিখ অনুযায়ী views — সব series মিলিয়ে</h3>
-      <div id="allDbTable" style="overflow-x:auto"></div>
-    </div>
+    <!-- All mode shows views by date inside the "Views per day" chart
+         itself (his reference layout, Oct 24) — no long date list. -->
     <div class="chartbox"><h3>Views per day (last 30 days)</h3><canvas id="chartDaily"></canvas></div>
     <div class="chartbox"><h3>Views per series (last 30 days)</h3><canvas id="chartSeries"></canvas></div>
     <div class="chartbox"><h3 id="funnelTitle">Drop-off funnel — views per part</h3><canvas id="chartFunnel"></canvas></div>
@@ -1739,25 +1737,9 @@ async function runAnalytics() {
       options: { ...baseOpts, indexAxis: 'y' },
     });
 
-    // (b2) All mode (his clarification, Oct 24): views counted BY DATE —
-    // সব series মিলিয়ে কোন তারিখে কত views (আজ 24 তারিখে কত, 25-এ কত…).
+    // All mode = the normal charts computed over ALL series (the
+    // "Views per day" chart IS the by-date count he asked for).
     const allMode = $('anSeries').value === '__all__';
-    const allBox = $('allDbBox');
-    if (allMode) {
-      const todayKey = new Date().toISOString().slice(0, 10);
-      const rowsHtml = [...days].reverse().map((d) => `<tr>
-          <td style="padding:7px 10px;border-bottom:1px solid #ffffff14">${d.label}${d.key === todayKey ? ' <b style="color:#3ddc84">(আজ)</b>' : ''}</td>
-          <td style="padding:7px 10px;border-bottom:1px solid #ffffff14;text-align:right"><b>${(dayCount[d.key] || 0).toLocaleString()}</b> views</td>
-        </tr>`).join('');
-      $('allDbTable').innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:14px;max-width:520px">
-        <tr style="color:#9aa4b2">
-          <th style="padding:7px 10px;text-align:left">তারিখ</th>
-          <th style="padding:7px 10px;text-align:right">Views</th>
-        </tr>${rowsHtml}</table>`;
-      allBox.style.display = 'block';
-    } else {
-      allBox.style.display = 'none';
-    }
 
     // (c) drop-off funnel: views per part_number for the selected series
     // (All mode: the most-viewed series, all-time)
