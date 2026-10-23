@@ -450,7 +450,7 @@
     </div>
     <!-- All mode shows views by date inside the "Views per day" chart
          itself (his reference layout, Oct 24) — no long date list. -->
-    <div class="chartbox"><h3>🔴 Live Activity — শেষ ৬০ মিনিটের views (প্রতি ৫ মিনিটে)</h3><canvas id="chartLive"></canvas></div>
+    <div class="chartbox"><h3>🔴 Live Activity — শেষ ৬০ মিনিটের views (প্রতি ৫ মিনিটে)</h3><canvas id="chartLive" style="max-height:150px"></canvas></div>
     <div class="chartbox"><h3>Views per day (last 30 days)</h3><canvas id="chartDaily"></canvas></div>
     <div class="chartbox"><h3>Views per series (last 30 days)</h3><canvas id="chartSeries"></canvas></div>
     <div class="chartbox"><h3 id="funnelTitle">Drop-off funnel — views per part</h3><canvas id="chartFunnel"></canvas></div>
@@ -1707,9 +1707,9 @@ async function runAnalytics(quiet) {
       .filter((ev) => (ev.created_at || '').slice(0, 10) === todayKey)
       .length.toLocaleString();
     const watchMs = events.reduce((a, ev) => a + (ev.watched_ms || 0), 0);
-    $('statWatch').textContent = watchMs >= 3600000
-      ? (watchMs / 3600000).toFixed(1) + ' ঘণ্টা'
-      : Math.round(watchMs / 60000) + ' মিনিট';
+    // His rule (Oct 24): Watch Time = plain number only (minutes) —
+    // no unit word in the big value; the label carries the meaning.
+    $('statWatch').textContent = Math.round(watchMs / 60000).toLocaleString();
     $('statSeriesParts').textContent = series.length + ' / ' + parts.length;
 
     destroyCharts();
@@ -1743,7 +1743,7 @@ async function runAnalytics(quiet) {
     });
     charts.live = new Chart($('chartLive'), {
       type: 'bar',
-      data: { labels: liveLabels, datasets: [{ data: liveBuckets, backgroundColor: '#ff5c7a' }] },
+      data: { labels: liveLabels, datasets: [{ data: liveBuckets, backgroundColor: '#ff5c7a', maxBarThickness: 8, categoryPercentage: 0.55, barPercentage: 0.8 }] },
       options: baseOpts,
     });
 
