@@ -429,7 +429,7 @@
       <p class="hint">Built from <code>view_events</code> (last 30 days) and the <code>views_count</code> column on parts. Empty states are normal for a new app.</p>
       <div class="row">
         <div class="field" style="max-width:320px">
-          <label for="anSeries">Series (for drop-off funnel)</label>
+          <label for="anSeries">Series (All = সম্পূর্ণ database)</label>
           <select id="anSeries"><option value="">— select series —</option></select>
         </div>
         <div><button class="btn" id="btnRefreshAnalytics">⟳ Refresh</button></div>
@@ -437,16 +437,20 @@
       <div class="msg" id="anMsg"></div>
     </div>
     <div class="stats">
+      <div class="stat"><div class="v" id="statInstalls">—</div><div class="l">⬇️ Total Downloads</div></div>
+      <div class="stat"><div class="v" id="statLive">—</div><div class="l">🟢 Live Users</div></div>
       <div class="stat"><div class="v" id="statViews">—</div><div class="l">Total views (30 days)</div></div>
       <div class="stat"><div class="v" id="statSeries">—</div><div class="l">Total series</div></div>
       <div class="stat"><div class="v" id="statParts">—</div><div class="l">Total parts</div></div>
       <div class="stat"><div class="v" id="statPublished">—</div><div class="l">Published parts</div></div>
-      <div class="stat"><div class="v" id="statInstalls">—</div><div class="l">📥 Total installs</div></div>
-      <div class="stat"><div class="v" id="statLive">—</div><div class="l">🟢 Live now (6 min)</div></div>
+    </div>
+    <div class="chartbox" id="allDbBox" style="display:none">
+      <h3>📚 সম্পূর্ণ database — সব series এক নজরে</h3>
+      <div id="allDbTable" style="overflow-x:auto"></div>
     </div>
     <div class="chartbox"><h3>Views per day (last 30 days)</h3><canvas id="chartDaily"></canvas></div>
     <div class="chartbox"><h3>Views per series (last 30 days)</h3><canvas id="chartSeries"></canvas></div>
-    <div class="chartbox"><h3>Drop-off funnel — views per part</h3><canvas id="chartFunnel"></canvas></div>
+    <div class="chartbox"><h3 id="funnelTitle">Drop-off funnel — views per part</h3><canvas id="chartFunnel"></canvas></div>
     <div class="chartbox"><h3>Top 10 parts (all time, by views_count)</h3><canvas id="chartTop"></canvas></div>
   </section>
 
@@ -1591,6 +1595,10 @@ const CHART_COLORS = ['#4da3ff', '#f2c14e', '#3ddc84', '#ff8a5c', '#b48aff', '#5
 async function loadAnalyticsSeries() {
   const sel = $('anSeries');
   sel.innerHTML = '<option value="">— select series —</option>';
+  const allOpt = document.createElement('option');
+  allOpt.value = '__all__';
+  allOpt.textContent = '🌐 All — সম্পূর্ণ database';
+  sel.appendChild(allOpt);
   try {
     const rows = await fetchSeries();
     rows.forEach((r) => {
@@ -1600,6 +1608,7 @@ async function loadAnalyticsSeries() {
     });
     sel.dataset.loaded = '1';
   } catch (e) { /* series dropdown optional; funnel just won't have choices */ }
+  sel.value = '__all__'; // his default view: the whole database
   runAnalytics();
   loadPresence();
 }
@@ -1720,10 +1729,51 @@ async function runAnalytics() {
       options: { ...baseOpts, indexAxis: 'y' },
     });
 
+    // (b2) All-database table (his ask, Oct 24): every series at a
+    // glance — parts, published, views all-time + last 30 days, state.
+    const allMode = $('anSeries').value === '__all__';
+    const allBox = $('allDbBox');
+    if (allMode) {
+      const rowsHtml = series.map((s) => {
+        const sp = parts.filter((p) => p.series_id === s.id);
+        const pub = sp.filter((p) => p.published).length;
+        const allTime = sp.reduce((a, p) => a + (p.views_count || 0), 0);
+        return { title: s.title, n: sp.length, pub, allTime, v30: perSeries[s.id] || 0 };
+      }).sort((a, b) => b.v30 - a.v30 || b.allTime - a.allTime)
+        .map((r) => `<tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #ffffff14"><b>${esc(r.title)}</b></td>
+          <td style="padding:8px 10px;border-bottom:1px solid #ffffff14;text-align:center">${r.n}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #ffffff14;text-align:center">${r.pub}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #ffffff14;text-align:center">${r.allTime.toLocaleString()}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #ffffff14;text-align:center">${r.v30.toLocaleString()}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #ffffff14;text-align:center">${r.n === 0 ? '— খালি' : r.pub === r.n ? '✅ সব live' : r.pub === 0 ? '📝 সব draft' : '◐ আংশিক live'}</td>
+        </tr>`).join('');
+      $('allDbTable').innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr style="color:#9aa4b2">
+          <th style="padding:8px 10px;text-align:left">Series</th>
+          <th style="padding:8px 10px;text-align:center">Parts</th>
+          <th style="padding:8px 10px;text-align:center">Published</th>
+          <th style="padding:8px 10px;text-align:center">Views (সব সময়)</th>
+          <th style="padding:8px 10px;text-align:center">Views (30 দিন)</th>
+          <th style="padding:8px 10px;text-align:center">অবস্থা</th>
+        </tr>${rowsHtml || '<tr><td style="padding:10px">No series yet.</td></tr>'}</table>`;
+      allBox.style.display = 'block';
+    } else {
+      allBox.style.display = 'none';
+    }
+
     // (c) drop-off funnel: views per part_number for the selected series
-    let funnelSid = $('anSeries').value || (series[0] && series[0].id);
+    // (All mode: the most-viewed series, all-time)
+    let funnelSid = $('anSeries').value;
+    if (allMode || !funnelSid) {
+      const totals = {};
+      parts.forEach((p) => { totals[p.series_id] = (totals[p.series_id] || 0) + (p.views_count || 0); });
+      funnelSid = Object.keys(totals).sort((a, b) => totals[b] - totals[a])[0] || (series[0] && series[0].id);
+    }
+    $('funnelTitle').textContent = allMode
+      ? `Drop-off funnel — ${seriesTitle[funnelSid] || ''} (সবচেয়ে বেশি দেখা)`
+      : 'Drop-off funnel — views per part';
     if (funnelSid) {
-      if (!$('anSeries').value) $('anSeries').value = funnelSid;
       const fp = parts.filter((p) => p.series_id === funnelSid).sort((a, b) => a.part_number - b.part_number);
       charts.funnel = new Chart($('chartFunnel'), {
         type: 'bar',
