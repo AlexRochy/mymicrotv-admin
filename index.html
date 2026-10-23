@@ -1854,6 +1854,11 @@ function showSeriesEditor(seriesEl) {
     </div>
     <div class="field"><label>Description</label><textarea data-f="description">${esc(s.description || '')}</textarea></div>
     <div class="field"><label>Poster URL</label><input type="text" data-f="poster_url" value="${esc(s.poster_url || '')}"></div>
+    <div class="field"><label>🖼️ Change poster / thumbnail — ছবি আপলোড করো</label>
+      <input type="file" data-poster-file accept="image/*">
+      <small style="color:#666">আপলোডের সময় thumbnail দিতে ভুলে গেলে এখান থেকে ছবি বেছে Save দাও — poster বদলে যাবে, আর যেসব part-এর thumbnail ফাঁকা আছে সেগুলোতেও এই ছবি বসে যাবে।</small>
+      ${s.poster_url ? `<img src="${esc(s.poster_url)}" alt="" style="width:90px;border-radius:8px;display:block;margin-top:6px">` : ''}
+    </div>
     <div class="switchrow"><label class="switch"><input type="checkbox" data-f="is_ai_generated" ${s.is_ai_generated ? 'checked' : ''}><span class="slider"></span></label><span>Made with AI</span></div>
     <div class="row">
       <button class="btn small" data-save>Save</button>
@@ -1862,18 +1867,36 @@ function showSeriesEditor(seriesEl) {
   seriesEl.appendChild(div);
   div.querySelector('[data-cancel]').onclick = () => div.remove();
   div.querySelector('[data-save]').onclick = async () => {
+    const saveBtn = div.querySelector('[data-save]');
     try {
       await requireAdmin();
+      // New poster image picked? Upload it to R2 first and use its URL;
+      // it also repairs every part of this series whose thumbnail is empty.
+      let posterUrl = div.querySelector('[data-f=poster_url]').value.trim() || null;
+      const posterFile = div.querySelector('[data-poster-file]').files[0];
+      if (posterFile) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Uploading image…';
+        const key = `posters/${Date.now()}-${safeName(posterFile.name)}`;
+        await uploadToR2(posterFile, key, posterFile.type || 'image/jpeg', null);
+        posterUrl = r2Url(key);
+        await supa.from('parts').update({ thumbnail_url: posterUrl }).eq('series_id', s.id).is('thumbnail_url', null);
+        await supa.from('parts').update({ thumbnail_url: posterUrl }).eq('series_id', s.id).eq('thumbnail_url', '');
+      }
       const { error } = await supa.from('series').update({
         title: div.querySelector('[data-f=title]').value.trim(),
         category: div.querySelector('[data-f=category]').value.trim() || null,
         description: div.querySelector('[data-f=description]').value.trim() || null,
-        poster_url: div.querySelector('[data-f=poster_url]').value.trim() || null,
+        poster_url: posterUrl,
         is_ai_generated: div.querySelector('[data-f=is_ai_generated]').checked,
       }).eq('id', s.id);
       if (error) throw error;
       toast('Series updated'); loadContent();
-    } catch (err) { setMsg('contentMsg', 'Update failed: ' + friendlyError(err), 'err'); }
+    } catch (err) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+      setMsg('contentMsg', 'Update failed: ' + friendlyError(err), 'err');
+    }
   };
 }
 async function deleteSeries(seriesEl) {
