@@ -441,6 +441,8 @@
       <div class="stat"><div class="v" id="statSeries">—</div><div class="l">Total series</div></div>
       <div class="stat"><div class="v" id="statParts">—</div><div class="l">Total parts</div></div>
       <div class="stat"><div class="v" id="statPublished">—</div><div class="l">Published parts</div></div>
+      <div class="stat"><div class="v" id="statInstalls">—</div><div class="l">📥 Total installs</div></div>
+      <div class="stat"><div class="v" id="statLive">—</div><div class="l">🟢 Live now (6 min)</div></div>
     </div>
     <div class="chartbox"><h3>Views per day (last 30 days)</h3><canvas id="chartDaily"></canvas></div>
     <div class="chartbox"><h3>Views per series (last 30 days)</h3><canvas id="chartSeries"></canvas></div>
@@ -1523,9 +1525,30 @@ async function loadAnalyticsSeries() {
     sel.dataset.loaded = '1';
   } catch (e) { /* series dropdown optional; funnel just won't have choices */ }
   runAnalytics();
+  loadPresence();
 }
 $('anSeries').addEventListener('change', runAnalytics);
 $('btnRefreshAnalytics').onclick = runAnalytics;
+
+/** Presence stats (1.0.36): total installs + live users from `devices`.
+    Live = pinged within the last 6 minutes (same rule as his IPTV panel). */
+async function loadPresence() {
+  try {
+    if (!supa) return;
+    const total = await supa.from('devices').select('device_id', { count: 'exact', head: true });
+    if (total.error) throw total.error;
+    $('statInstalls').textContent = total.count ?? 0;
+    const since = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    const live = await supa.from('devices').select('device_id', { count: 'exact', head: true }).gte('last_seen', since);
+    if (live.error) throw live.error;
+    $('statLive').textContent = live.count ?? 0;
+  } catch (e) {
+    // devices table may not exist yet (SQL not run) — leave dashes.
+    $('statInstalls').textContent = '—';
+    $('statLive').textContent = '—';
+  }
+}
+$('btnRefreshAnalytics').addEventListener('click', loadPresence);
 
 /** Fetch up to 50k view_events since `since` (paged). */
 async function fetchViewEvents(since) {
